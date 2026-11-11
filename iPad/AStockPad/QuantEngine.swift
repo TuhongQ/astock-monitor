@@ -723,44 +723,54 @@ enum QuantEngine {
     /// Out of sample the top decile's predicted probability ran ~17% high.
     private static let overnightCalibration = 0.83
 
+    struct OvernightSnapshot {
+        let p3: Double; let p5: Double; let gap: Double; let raw: [Double]
+        let amp: Double; let turnover: Double?; let fullAmount: Double; let vwap: Double?
+    }
+
+    /// 14:50 snapshot features and the next-day-high probabilities for one stock (no eligibility filters).
+    static func overnightSnapshot(_ q: Quote, fraction: Double) -> OvernightSnapshot? {
+        guard let high = q.high, let low = q.low, high > 0, low > 0, q.price > 0 else { return nil }
+        let prev = q.prevClose ?? q.price / (1 + q.changePercent / 100)
+        guard prev > 0 else { return nil }
+        let ratio = Market.limitRatio(code: q.code, name: q.name) ?? 0.1
+        let fullAmount = q.amount / max(fraction, 0.03)
+        var vwap: Double?
+        for scale in [100.0, 1.0] where q.volume > 0 {
+            let candidate = q.amount / (q.volume * scale)
+            if candidate >= low * 0.97 && candidate <= high * 1.03 { vwap = candidate; break }
+        }
+        let turnover = q.turnover.map { $0 / max(fraction, 0.03) }
+        let amp = (high - low) / prev * 100
+        let raw: [Double] = [
+            q.changePercent / (ratio * 100),
+            high > low ? (q.price - low) / (high - low) : 1,
+            (high - q.price) / prev * 100,
+            vwap.map { (q.price / $0 - 1) * 100 } ?? 0,
+            log(max(amp, 0.3)),
+            turnover.map { log(max($0, 0.2)) } ?? overnightMu[5],
+            q.volumeRatio.map { log(min(max($0, 0.1), 20)) } ?? overnightMu[6],
+            log10(max(fullAmount, 1)),
+            ratio >= 0.2 ? 1 : 0,
+        ]
+        var z: [Double] = [1]
+        for i in raw.indices { z.append((min(max(raw[i], overnightClip[i].0), overnightClip[i].1) - overnightMu[i]) / overnightSd[i]) }
+        func dot(_ w: [Double]) -> Double { zip(w, z).reduce(0) { $0 + $1.0 * $1.1 } }
+        return OvernightSnapshot(p3: 1 / (1 + exp(-dot(overnightW3))) * overnightCalibration,
+                                 p5: 1 / (1 + exp(-dot(overnightW5))) * overnightCalibration,
+                                 gap: dot(overnightWGap), raw: raw, amp: amp, turnover: turnover, fullAmount: fullAmount, vwap: vwap)
+    }
+
     static func overnight(_ ctx: QuantContext, perBoard: Int = 15) -> [StockPick] {
         let minute = Market.minuteOfDay(ctx.now)
         let preview = Market.isSession(ctx.now) && minute < 890
         let fraction = Market.volumeFraction(ctx.now)
         var byBoard: [String: [(rank: Double, p3: Double, p5: Double, gap: Double, raw: [Double], amp: Double, turnover: Double?, amount: Double, q: Quote)]] = [:]
         for q in ctx.quotes {
-            guard !q.suspended, !q.upperLimit, !q.lowerLimit, q.price >= 2, tradeable(q),
-                  let high = q.high, let low = q.low, high > 0, low > 0 else { continue }
+            guard !q.suspended, !q.upperLimit, !q.lowerLimit, q.price >= 2, tradeable(q) else { continue }
             if let up = q.limitUpPrice, q.price >= up - 0.011 { continue }
-            let prev = q.prevClose ?? q.price / (1 + q.changePercent / 100)
-            guard prev > 0 else { continue }
-            let ratio = Market.limitRatio(code: q.code, name: q.name) ?? 0.1
-            let fullAmount = q.amount / max(fraction, 0.03)
-            guard fullAmount >= 5e7 else { continue }
-            var vwap: Double?
-            for scale in [100.0, 1.0] where q.volume > 0 {
-                let candidate = q.amount / (q.volume * scale)
-                if candidate >= low * 0.97 && candidate <= high * 1.03 { vwap = candidate; break }
-            }
-            let turnover = q.turnover.map { $0 / max(fraction, 0.03) }
-            let amp = (high - low) / prev * 100
-            let raw: [Double] = [
-                q.changePercent / (ratio * 100),
-                high > low ? (q.price - low) / (high - low) : 1,
-                (high - q.price) / prev * 100,
-                vwap.map { (q.price / $0 - 1) * 100 } ?? 0,
-                log(max(amp, 0.3)),
-                turnover.map { log(max($0, 0.2)) } ?? overnightMu[5],
-                q.volumeRatio.map { log(min(max($0, 0.1), 20)) } ?? overnightMu[6],
-                log10(max(fullAmount, 1)),
-                ratio >= 0.2 ? 1 : 0,
-            ]
-            var z: [Double] = [1]
-            for i in raw.indices { z.append((min(max(raw[i], overnightClip[i].0), overnightClip[i].1) - overnightMu[i]) / overnightSd[i]) }
-            func dot(_ w: [Double]) -> Double { zip(w, z).reduce(0) { $0 + $1.0 * $1.1 } }
-            let p3 = 1 / (1 + exp(-dot(overnightW3))) * overnightCalibration
-            let p5 = 1 / (1 + exp(-dot(overnightW5))) * overnightCalibration
-            let gap = dot(overnightWGap)
+            guard let snap = overnightSnapshot(q, fraction: fraction), snap.fullAmount >= 5e7 else { continue }
+            let (p3, p5, gap, raw, amp, turnover, fullAmount) = (snap.p3, snap.p5, snap.gap, snap.raw, snap.amp, snap.turnover, snap.fullAmount)
             let board = WatchData.pickBoard(code: q.code)
             byBoard[board, default: []].append((p5 + 0.1 * gap, p3, p5, gap, raw, amp, turnover, fullAmount, q))
         }

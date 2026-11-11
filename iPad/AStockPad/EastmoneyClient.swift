@@ -21,7 +21,7 @@ actor EastmoneyClient {
         var errorDescription: String? { if case .badResponse(let text) = self { return text }; return nil }
     }
 
-    private func json(_ urlString: String, referer: String? = nil) async throws -> Any {
+    func json(_ urlString: String, referer: String? = nil) async throws -> Any {
         guard let url = URL(string: urlString) else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
@@ -33,7 +33,7 @@ actor EastmoneyClient {
         return try JSONSerialization.jsonObject(with: data)
     }
 
-    private static func number(_ value: Any?) -> Double? {
+    static func number(_ value: Any?) -> Double? {
         if let number = value as? NSNumber { let v = number.doubleValue; return v.isFinite ? v : nil }
         if let text = value as? String, let v = Double(text), v.isFinite { return v }
         return nil

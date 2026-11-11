@@ -60,6 +60,7 @@ struct WatchSidebar: View {
                     Button { open(code) } label: { row(code) }
                         .swipeActions {
                             Button(role: .destructive) { store.toggleWatch(code) } label: { Label("移除", systemImage: "trash") }
+                            Button { store.analysisJump = code } label: { Label("分析", systemImage: "stethoscope") }.tint(.blue)
                         }
                 }
                 .onMove { store.moveWatch(from: $0, to: $1, in: codes) }
@@ -436,6 +437,7 @@ struct PicksView: View {
                 List(picks) { pick in
                     Button { open(pick.code) } label: { pickRow(pick) }
                         .contextMenu {
+                            Button("个股分析") { store.analysisJump = pick.code }
                             Button(store.watch.codes.contains(pick.code) ? "移出自选" : "加入自选") { store.toggleWatch(pick.code) }
                             Button("加入黑名单（不再推荐）", role: .destructive) { store.toggleBlacklist(pick.code) }
                         }
@@ -535,10 +537,17 @@ struct PicksView: View {
 struct SettingsView: View {
     @EnvironmentObject var store: PadStore
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(PadAppearance.key) private var appearance = "system"
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("外观") {
+                    Picker("皮肤", selection: $appearance) {
+                        ForEach(PadAppearance.modes, id: \.id) { mode in Label(mode.title, systemImage: mode.icon).tag(mode.id) }
+                    }
+                    .pickerStyle(.segmented)
+                }
                 Section("告警") {
                     Stepper(String(format: "涨幅阈值 %.1f%%（自选股）", store.settings.threshold), value: $store.settings.threshold, in: 0...20, step: 0.5)
                     Stepper(String(format: "速拉阈值 %.1f%%（全市场）", store.settings.rapidThreshold), value: $store.settings.rapidThreshold, in: 0.5...10, step: 0.5)

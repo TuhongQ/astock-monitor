@@ -1,14 +1,23 @@
 import SwiftUI
 
+/// 外观皮肤：跟随系统 / 日间 / 夜间。
+enum PadAppearance {
+    static let key = "pad.appearance"
+    static let modes: [(id: String, title: String, icon: String)] = [("system", "跟随系统", "circle.lefthalf.filled"), ("light", "日间", "sun.max"), ("dark", "夜间", "moon.stars")]
+    static func scheme(_ mode: String) -> ColorScheme? { mode == "dark" ? .dark : (mode == "light" ? .light : nil) }
+}
+
 @main
 struct AStockPadApp: App {
     @StateObject private var store = PadStore()
+    @AppStorage(PadAppearance.key) private var appearance = "system"
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(store)
+                .preferredColorScheme(PadAppearance.scheme(appearance))
                 .onChange(of: scenePhase) { phase in
                     if phase == .active { store.start() } else if phase == .background { store.stop() }
                 }
@@ -23,6 +32,7 @@ struct RootView: View {
     @State private var tab = 0
     @State private var showSettings = false
     @State private var columnVisibility = NavigationSplitViewVisibility.all
+    @AppStorage(PadAppearance.key) private var appearance = "system"
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -32,6 +42,12 @@ struct RootView: View {
                     ToolbarItem(placement: .navigationBarTrailing) {
                         Button { showSettings = true } label: { Image(systemName: "gearshape") }
                     }
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button {
+                            let ids = PadAppearance.modes.map(\.id)
+                            appearance = ids[((ids.firstIndex(of: appearance) ?? 0) + 1) % ids.count]
+                        } label: { Image(systemName: PadAppearance.modes.first { $0.id == appearance }?.icon ?? "circle.lefthalf.filled") }
+                    }
                 }
         } detail: {
             NavigationStack(path: $path) {
@@ -39,7 +55,13 @@ struct RootView: View {
                     .navigationDestination(for: String.self) { code in StockDetailView(code: code) }
             }
         }
-        .sheet(isPresented: $showSettings) { SettingsView().environmentObject(store) }
+        .sheet(isPresented: $showSettings) { SettingsView().environmentObject(store).preferredColorScheme(PadAppearance.scheme(appearance)) }
+        .onChange(of: store.analysisJump) { code in
+            guard let code else { return }
+            path = []; tab = 3
+            store.analyze(code)
+            store.analysisJump = nil
+        }
         .overlay(alignment: .bottom) {
             if let banner = store.banner {
                 BannerView(banner: banner)
@@ -103,6 +125,7 @@ struct MainTabs: View {
             switch tab {
             case 1: AlertsView(open: open)
             case 2: PicksView(open: open)
+            case 3: AnalysisView(open: open)
             default: QuoteListView(open: open)
             }
             Divider()
@@ -120,8 +143,9 @@ struct MainTabs: View {
                     Text("行情").tag(0)
                     Text(store.unseenAlerts > 0 ? "告警 \(min(store.unseenAlerts, 99))" : "告警").tag(1)
                     Text("潜力股 \((store.lists["all"] ?? []).count)").tag(2)
+                    Text("个股分析").tag(3)
                 }
-                .pickerStyle(.segmented).frame(width: 360)
+                .pickerStyle(.segmented).frame(width: 460)
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button { store.refreshNow() } label: { Image(systemName: "arrow.clockwise") }

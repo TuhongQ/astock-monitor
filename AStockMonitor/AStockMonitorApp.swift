@@ -1,6 +1,22 @@
 import SwiftUI
 import AppKit
 
+/// 外观皮肤：跟随系统 / 日间 / 夜间。作用于所有窗口、菜单栏面板和表格。
+enum AppAppearance {
+    static let key = "appearanceMode"
+    static let modes: [(id: String, title: String, icon: String)] = [("system", "跟随系统", "circle.lefthalf.filled"), ("light", "日间", "sun.max"), ("dark", "夜间", "moon.stars")]
+    static var current: String { UserDefaults.standard.string(forKey: key) ?? "system" }
+    static func apply(_ mode: String) {
+        UserDefaults.standard.set(mode, forKey: key)
+        NSApp.appearance = mode == "dark" ? NSAppearance(named: .darkAqua) : (mode == "light" ? NSAppearance(named: .aqua) : nil)
+        DebugLog.write("外观切换为 \(mode)")
+    }
+    static func next(after mode: String) -> String {
+        let ids = modes.map(\.id)
+        return ids[((ids.firstIndex(of: mode) ?? 0) + 1) % ids.count]
+    }
+}
+
 @main
 struct AStockMonitorApp: App {
     @StateObject private var store = MonitorStore()
@@ -13,6 +29,7 @@ struct AStockMonitorApp: App {
                 .frame(minWidth: 1050, minHeight: 680)
                 .environmentObject(store)
                 .onAppear {
+                    AppAppearance.apply(AppAppearance.current)
                     appDelegate.store = store
                     store.start()
                     // SwiftUI 可能在 Space/窗口重新挂载时再次调用 onAppear。

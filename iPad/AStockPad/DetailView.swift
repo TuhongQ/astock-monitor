@@ -40,6 +40,9 @@ struct StockDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
+                Button { store.analysisJump = code } label: { Label("个股分析", systemImage: "stethoscope") }
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
                 Button { store.toggleWatch(code) } label: {
                     Image(systemName: store.watch.codes.contains(code) ? "star.fill" : "star")
                 }

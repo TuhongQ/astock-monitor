@@ -28,6 +28,16 @@ final class PadStore: ObservableObject {
     @Published var watch: WatchData = Persist.read(WatchData.self, "watch.json", fallback: WatchData()) { didSet { Persist.write(watch, "watch.json") } }
     @Published var settings: PadSettings = Persist.read(PadSettings.self, "settings.json", fallback: PadSettings()) { didSet { Persist.write(settings, "settings.json") } }
 
+    // 个股分析
+    @Published private(set) var analysis: StockAnalysisResult?
+    @Published private(set) var analysisCandidates: [Quote] = []
+    @Published private(set) var analysisMessage: String?
+    @Published private(set) var analysisLoading = false
+    @Published private(set) var analysisHistory: [String] = UserDefaults.standard.stringArray(forKey: "analysis.history") ?? []
+    /// Set to a code to switch to the 分析 tab and analyse it (from lists / detail pages).
+    @Published var analysisJump: String?
+    private var analysisTask: Task<Void, Never>?
+
     let tracker = TickTracker()
     private let client = EastmoneyClient.shared
     private var byCode: [String: Quote] = [:]
@@ -533,6 +543,47 @@ final class PadStore: ObservableObject {
             }
         }
         return nil
+    }
+
+    // MARK: 个股分析
+
+    func analyze(_ raw: String) {
+        let query = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        let digits = query.filter(\.isNumber)
+        var target: Quote?
+        if digits.count == 6 {
+            target = byCode[digits]
+        } else {
+            let key = query.uppercased().replacingOccurrences(of: " ", with: "")
+            let exact = quotes.first { $0.name.uppercased().replacingOccurrences(of: " ", with: "") == key }
+            let partial = quotes.filter { $0.name.uppercased().contains(key) }
+            target = exact ?? (partial.count == 1 ? partial[0] : nil)
+            if target == nil, partial.count > 1 {
+                analysisCandidates = Array(partial.prefix(12)); analysisMessage = "匹配到多只股票，请选择"; analysis = nil
+                return
+            }
+        }
+        analysisCandidates = []
+        guard let q = target else { analysisMessage = quotes.isEmpty ? "行情还在加载，请稍后再试" : "没有找到这只股票"; analysis = nil; return }
+        guard !q.suspended, q.price > 0 else { analysisMessage = "该股停牌或暂无报价"; analysis = nil; return }
+        analysisMessage = nil
+        analysisLoading = true
+        analysisTask?.cancel()
+        analysisTask = Task {
+            async let historyTask = try? client.fetchDaily(code: q.code)
+            async let extrasTask = client.fetchAnalysisExtras(code: q.code)
+            async let newsTask = try? client.fetchNews(code: q.code)
+            let (history, extras, news) = await (historyTask, extrasTask, newsTask)
+            guard !Task.isCancelled else { return }
+            let live = byCode[q.code] ?? q
+            analysis = AnalysisEngine.analyze(live, history: history ?? [], lists: lists, breadth: breadth, emotion: emotion, pools: pools,
+                                              tracker: tracker, extras: extras, news: news ?? [], now: Date())
+            analysisLoading = false
+            let entry = "\(q.code) \(q.name)"
+            analysisHistory = [entry] + analysisHistory.filter { $0 != entry }.prefix(11)
+            UserDefaults.standard.set(analysisHistory, forKey: "analysis.history")
+        }
     }
 
     // MARK: Watchlist

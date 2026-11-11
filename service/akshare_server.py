@@ -28,7 +28,7 @@ socket.setdefaulttimeout(10)
 
 HOST, PORT, CACHE_SECONDS = "127.0.0.1", 8767, 1.5
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-API_VERSION = 24
+API_VERSION = 25
 INDEX_SYMBOLS = {
     "sh000001": "上证指数", "sz399001": "深证成指",
     "sz399006": "创业板指", "sh000680": "科创综指",
@@ -3025,6 +3025,9 @@ def _swing_probabilities(q, history, now):
             "high20": max(highs[-21:-1]), "high60": max(highs[-61:-1]), "low20": min(lows[-21:-1]),
             "amountRatio": today_amount / avg5 if avg5 > 0 else None}
 
+analysis_io_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="analysis-io")
+analysis_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="analysis")
+
 def _em_secid(code):
     return ("1." if code.startswith(("6", "9")) and not code.startswith("92") else "0.") + code
 
@@ -3046,7 +3049,7 @@ def analysis_extras(code, history):
         "trends": f"https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid={secid}&fields1=f1,f2,f8&fields2=f51,f53,f58&ndays=1&iscr=0",
     }
     results = {}
-    futures = {name: fast_executor.submit(_em_get, url) for name, url in jobs.items()}
+    futures = {name: analysis_io_executor.submit(_em_get, url) for name, url in jobs.items()}
     for name, future in futures.items():
         try:
             results[name] = future.result(timeout=10)
@@ -3197,7 +3200,7 @@ def analyze_stock(query, provider="auto"):
         except Exception as exc:
             print(f"Analyze daily fetch failed for {code}: {exc}", flush=True)
             history = None
-    extras_future = fast_executor.submit(analysis_extras, code, history)
+    extras_future = analysis_executor.submit(analysis_extras, code, history)
     swing = _swing_probabilities(q, history, now) if history else None
     features = daily_features(q, history, now) if history else None
     payload = potential_payload(provider)

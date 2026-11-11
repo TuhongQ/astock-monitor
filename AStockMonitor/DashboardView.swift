@@ -492,6 +492,7 @@ struct DashboardView: View {
     @AppStorage("dashboard.potentialStrategy") private var potentialStrategy = "all"
     @AppStorage("dashboard.showStrategyLogic") private var showStrategyLogic = false
     @AppStorage("dashboard.overnightBoard") private var overnightBoard = "全部"
+    @AppStorage(AppAppearance.key) private var appearanceMode = "system"
     @State private var selectedTableQuote: String?
     @State private var selectedAlertIDs = Set<UUID>()
     @State private var selectedAlertLogDate: Date?
@@ -653,6 +654,11 @@ struct DashboardView: View {
             .frame(minWidth: 150, maxWidth: 240)
             Button { store.refresh(); if selectedTab == 2 { store.refreshPotential(force: true) } } label: { Image(systemName: "arrow.clockwise") }
                 .help("立即刷新（⌘R）")
+            Button {
+                appearanceMode = AppAppearance.next(after: appearanceMode)
+                AppAppearance.apply(appearanceMode)
+            } label: { Image(systemName: AppAppearance.modes.first { $0.id == appearanceMode }?.icon ?? "circle.lefthalf.filled") }
+                .help("外观：\(AppAppearance.modes.first { $0.id == appearanceMode }?.title ?? "跟随系统")（点击切换 跟随系统 → 日间 → 夜间）")
             Button { openWindow(id: "settings") } label: { Image(systemName: "gearshape") }
                 .help("监控设置")
         }
@@ -2322,6 +2328,7 @@ struct SettingsView: View {
     @State private var serviceURL: String
     @State private var testing = false
     @State private var testResult = ""
+    @AppStorage(AppAppearance.key) private var appearanceMode = "system"
 
     init(store: MonitorStore) {
         self.store = store
@@ -2340,6 +2347,22 @@ struct SettingsView: View {
                 Text("配置告警规则、行情来源和日志导出")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
+
+                GroupBox {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("外观").font(.system(size: 13, weight: .medium))
+                            Text("夜间模式适合盘前盘后和夜盘复盘，立即生效").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Picker("外观", selection: $appearanceMode) {
+                            ForEach(AppAppearance.modes, id: \.id) { mode in Label(mode.title, systemImage: mode.icon).tag(mode.id) }
+                        }
+                        .pickerStyle(.segmented).labelsHidden().frame(width: 260)
+                        .onChange(of: appearanceMode) { AppAppearance.apply($0) }
+                    }
+                    .padding(4)
+                }
 
                 GroupBox {
                     VStack(alignment: .leading, spacing: 10) {
