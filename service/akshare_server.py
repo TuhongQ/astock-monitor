@@ -28,7 +28,7 @@ socket.setdefaulttimeout(10)
 
 HOST, PORT, CACHE_SECONDS = "127.0.0.1", 8767, 2
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-API_VERSION = 18
+API_VERSION = 19
 INDEX_SYMBOLS = {
     "sh000001": "上证指数", "sz399001": "深证成指",
     "sz399006": "创业板指", "sh000680": "科创综指",
@@ -977,6 +977,9 @@ STRATEGY_META = [
     {"id": "tail", "title": "尾盘潜伏", "icon": "moon.stars.fill",
      "summary": "14:30 后温和放量、收在高位的稳健个股",
      "description": "经典尾盘选股：涨幅 2.5%–6%、量比 ≥ 1.2、换手 3%–12%、流通市值 30–300 亿、收在日内高位，且午后 5 分钟线稳步走高、日线 5 日线在 10 日线上方、近 20 日涨幅不大。14:30 前显示的是预览结果。"},
+    {"id": "overnight", "title": "尾盘隔夜", "icon": "sunrise.fill",
+     "summary": "14:50 买入、次日冲高卖出：主板 / 创业科创各选次日大涨概率最高的 10 只",
+     "description": "全市场（剔除 ST、北交所、停牌、涨停封死、跌停、成交额 < 5000 万）逐只估算「次日盘中最高价比现价高 3% / 5%」的概率。模型用 1490 只随机个股 2026 年以来约 16.5 万个交易日拟合，并做了样本外检验：入选前 10 只次日冲高 ≥5% 的实际比例约 33%（全市场约 12%），≥3% 约 49%（全市场约 25%）。最有效的因子是换手、振幅、成交额和上影线（盘中资金活跃），量比过大、尾盘追高（高于分时均价）反而减分。注意：这类股票次日开盘平均低开约 1%，开盘直接卖出期望为负；建议次日挂 +3% 止盈单，10:30 前未成交或跌破 −3% 止损就卖出。14:50 自动锁定当日推荐，此前为预览；排序每 12 秒随行情刷新。"},
 ]
 STRATEGY_TITLES = {item["id"]: item["title"] for item in STRATEGY_META}
 
@@ -2246,6 +2249,203 @@ def strategy_tail(ctx):
                                   extra={"ret20": round(features["ret20"] * 100, 2) if features else None}))
     return _finalize(results, 50)
 
+# ---------------------------------------------------------------------------
+# 策略：尾盘隔夜（14:50 买入，次日冲高卖出）
+# ---------------------------------------------------------------------------
+# Logistic models fitted on 1,490 random A-shares, 2026-01 → 2026-11 daily bars
+# (165k stock-days, out-of-sample from 2026-07-24). Target: next-day high over
+# today's close ≥ +3% / ≥ +5%. Only features available in the 14:50 snapshot
+# are used — adding daily-chart features did not improve the hit rate.
+OVERNIGHT_FEATS = ["limitPct", "pos", "upper", "vwapDev", "ampL", "trL", "amtRatioL", "lnAmt", "gem"]
+OVERNIGHT_CLIP = {"limitPct": (-0.8019, 0.6801), "pos": (0.0, 1.0), "upper": (0.0, 10.0885),
+                  "vwapDev": (-5.7016, 3.7886), "ampL": (0.0685, 2.6749), "trL": (-1.273, 3.0227),
+                  "amtRatioL": (-0.8484, 1.2074), "lnAmt": (7.7112, 9.8854), "gem": (0.0, 1.0)}
+OVERNIGHT_MU = [-0.02299, 0.45772, 2.54109, -0.85013, 1.39985, 1.02516, -0.03806, 8.40879, 0.37384]
+OVERNIGHT_SD = [0.25786, 0.29975, 2.11196, 1.71071, 0.5524, 0.87328, 0.38893, 0.51185, 0.48382]
+OVERNIGHT_W3 = [-1.05845, -0.00627, -0.05349, -0.02967, 0.04499, 0.51576, 0.13095, -0.16436, 0.16597, 0.06625]
+OVERNIGHT_W5 = [-2.08604, 0.00571, 0.00745, 0.03622, 0.07755, 0.48858, 0.20956, -0.16658, 0.22457, 0.04491]
+# Ridge model of next-open gap relative to the day's median: used as a small
+# penalty so that picks with the worst expected gap-down are avoided.
+OVERNIGHT_WGAP = [0.0033, 0.03033, -0.05259, -0.04161, -0.02969, 0.0223, -0.08234, -0.05187, -0.05035, 0.04183]
+# Out-of-sample the top decile's predicted probability ran ~17% above the
+# realised hit rate, so displayed probabilities are shrunk accordingly.
+OVERNIGHT_CALIBRATION = 0.83
+OVERNIGHT_PER_BOARD = 15
+OVERNIGHT_TAKE_PROFIT = 3.0
+OVERNIGHT_STOP = 3.0
+
+def _overnight_board(code):
+    return "创业科创" if code.startswith(("300", "301", "688", "689")) else "主板"
+
+def overnight_features(q, now):
+    price, prev_close = q.get("price") or 0, q.get("prevClose")
+    change = q.get("changePercent") or 0
+    if not prev_close or prev_close <= 0:
+        prev_close = price / (1 + change / 100) if change > -100 else 0
+    high, low = q.get("high") or price, q.get("low") or price
+    if price <= 0 or prev_close <= 0:
+        return None
+    ratio = limit_ratio(q["code"], q.get("name", "")) or 0.1
+    fraction = _volume_fraction(now)
+    amount = q.get("amount") or 0
+    full_amount = amount / fraction if fraction > 0 else amount
+    volume = q.get("volume") or 0
+    vwap = None
+    for scale in (100, 1):
+        candidate = amount / (volume * scale) if volume else None
+        if candidate and low * 0.97 <= candidate <= high * 1.03:
+            vwap = candidate
+            break
+    turnover = (q.get("turnover") or 0) / fraction if q.get("turnover") is not None else None
+    volume_ratio = q.get("volumeRatio")
+    raw = {
+        "limitPct": change / (ratio * 100),
+        "pos": (price - low) / (high - low) if high > low else 1.0,
+        "upper": (high - price) / prev_close * 100,
+        "vwapDev": (price / vwap - 1) * 100 if vwap else 0.0,
+        "ampL": math.log(max((high - low) / prev_close * 100, 0.3)),
+        "trL": math.log(max(turnover, 0.2)) if turnover is not None else 1.02516,
+        "amtRatioL": math.log(min(max(volume_ratio, 0.1), 20)) if volume_ratio else -0.03806,
+        "lnAmt": math.log10(max(full_amount, 1)),
+        "gem": 1.0 if ratio >= 0.2 else 0.0,
+    }
+    return raw, {"vwap": vwap, "turnover": turnover, "fullAmount": full_amount,
+                 "amplitude": (high - low) / prev_close * 100, "prevClose": prev_close}
+
+def overnight_scores(raw):
+    z = [1.0]
+    for name, mu, sd in zip(OVERNIGHT_FEATS, OVERNIGHT_MU, OVERNIGHT_SD):
+        lo, hi = OVERNIGHT_CLIP[name]
+        z.append((min(max(raw[name], lo), hi) - mu) / sd)
+    def logistic(weights):
+        return 1 / (1 + math.exp(-sum(w * x for w, x in zip(weights, z))))
+    gap = sum(w * x for w, x in zip(OVERNIGHT_WGAP, z))
+    return (logistic(OVERNIGHT_W3) * OVERNIGHT_CALIBRATION, logistic(OVERNIGHT_W5) * OVERNIGHT_CALIBRATION, gap)
+
+ohlc_lock = threading.Lock()
+ohlc_cache = {"at": 0.0, "rows": {}}
+
+def eastmoney_ohlc_snapshot(max_age=15):
+    """High / low / open / amount / volume for every A-share from Eastmoney's
+    paged list API. The Tencent snapshot used for quotes has no high / low and
+    estimates the traded amount, which the 尾盘隔夜 model needs."""
+    with ohlc_lock:
+        if time.time() - ohlc_cache["at"] < max_age and ohlc_cache["rows"]:
+            return ohlc_cache["rows"]
+    import requests
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
+    url = ("https://push2.eastmoney.com/api/qt/clist/get?pn={pn}&pz=100&po=1&np=1&fltt=2&invt=2&fid=f12"
+           "&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23&fields=f2,f3,f5,f6,f8,f10,f12,f15,f16,f17,f18")
+
+    def page(pn):
+        for attempt in range(2):
+            try:
+                data = requests.get(url.format(pn=pn), headers=headers, timeout=6).json().get("data") or {}
+                return data.get("diff") or [], data.get("total") or 0
+            except Exception:
+                time.sleep(0.3 * (attempt + 1))
+        return [], 0
+
+    first, total = page(1)
+    pages = max(1, math.ceil(total / 100)) if total else 60
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        diffs = [first] + [rows for rows, _ in pool.map(page, range(2, pages + 1))]
+
+    def num(value):
+        try:
+            parsed = float(value)
+            return parsed if math.isfinite(parsed) and parsed > 0 else None
+        except (TypeError, ValueError):
+            return None
+    rows = {}
+    for diff in diffs:
+        for item in diff:
+            code = str(item.get("f12", "")).zfill(6)
+            if num(item.get("f2")) is None:
+                continue
+            rows[code] = {"price": num(item.get("f2")), "high": num(item.get("f15")), "low": num(item.get("f16")), "open": num(item.get("f17")),
+                          "prevClose": num(item.get("f18")), "amount": num(item.get("f6")), "volume": num(item.get("f5")),
+                          "turnover": num(item.get("f8")), "volumeRatio": num(item.get("f10"))}
+    if len(rows) > 1000:
+        with ohlc_lock:
+            ohlc_cache.update(at=time.time(), rows=rows)
+    else:
+        print(f"Eastmoney OHLC snapshot incomplete: {len(rows)} rows", flush=True)
+    return rows or ohlc_cache["rows"]
+
+def strategy_overnight(ctx):
+    now = ctx["now"]
+    minute = now.hour * 60 + now.minute
+    preview = 570 <= minute < 890 and now.weekday() < 5
+    by_board: dict[str, list] = {"主板": [], "创业科创": []}
+    try:
+        ohlc = eastmoney_ohlc_snapshot()
+    except Exception as exc:
+        print(f"Eastmoney OHLC snapshot failed: {exc}", flush=True)
+        ohlc = {}
+    for base in ctx["rows"]:
+        extra = ohlc.get(base["code"])
+        if extra:
+            q = dict(base)
+            for key, value in extra.items():
+                if value is not None and key != "price":
+                    q[key] = value
+        else:
+            q = base
+        if not q.get("high") or not q.get("low"):
+            continue
+        code, price = q["code"], q.get("price", 0)
+        if (q.get("suspended") or q.get("upperLimit") or q.get("lowerLimit") or price < 2
+                or not _is_tradeable_board(code, q.get("name", ""))):
+            continue
+        limit_up = q.get("limitUpPrice")
+        if limit_up and price >= limit_up - 0.011:
+            continue
+        computed = overnight_features(q, now)
+        if not computed:
+            continue
+        raw, info = computed
+        if info["fullAmount"] < 5e7:
+            continue
+        p3, p5, gap = overnight_scores(raw)
+        rank = p5 + 0.1 * gap
+        by_board[_overnight_board(code)].append((rank, p3, p5, gap, raw, info, q))
+    results = []
+    for board, entries in by_board.items():
+        entries.sort(key=lambda entry: entry[0], reverse=True)
+        for position, (rank, p3, p5, gap, raw, info, q) in enumerate(entries[:OVERNIGHT_PER_BOARD], start=1):
+            price, change = q["price"], q.get("changePercent", 0)
+            score = 100 * (0.5 * min(p3 / 0.6, 1) + 0.5 * min(p5 / 0.4, 1))
+            amplitude, turnover = info["amplitude"], info["turnover"]
+            signals = [f"次日盘中冲高 ≥3% 概率约 {p3 * 100:.0f}%，≥5% 约 {p5 * 100:.0f}%（全市场平均约 25% / 12%）",
+                       f"{board}第 {position} 名：振幅 {amplitude:.1f}%、换手 {turnover:.1f}%、成交 {_fmt_yuan(info['fullAmount'])}（全天折算）"
+                       if turnover is not None else f"{board}第 {position} 名：振幅 {amplitude:.1f}%"]
+            if raw["upper"] >= 3:
+                signals.append(f"上影 {raw['upper']:.1f}%：盘中资金试过拉升，次日再冲概率更高")
+            if raw["vwapDev"] <= 0:
+                signals.append("现价在分时均价线下方，没有尾盘追高")
+            risks = ["高波动股次日开盘平均低开约 1%：不要开盘市价卖，挂止盈单等冲高"]
+            if raw["vwapDev"] > 1.5:
+                risks.append(f"高于分时均价 {raw['vwapDev']:.1f}%，尾盘追高，次日低开概率大")
+            if raw["pos"] > 0.9 and change > 3:
+                risks.append("收在日内最高附近，回测显示次日开盘更弱")
+            if gap < -0.4:
+                risks.append("隔夜模型估计其低开幅度在候选中偏大")
+            if ctx["weak"]:
+                risks.append("今日市场弱势")
+            take_profit = _round_price(price * (1 + OVERNIGHT_TAKE_PROFIT / 100))
+            stop = _round_price(price * (1 - OVERNIGHT_STOP / 100))
+            highlights = [f"冲高≥3% {p3 * 100:.0f}%", f"冲高≥5% {p5 * 100:.0f}%", f"止盈 {take_profit:.2f}",
+                          f"振幅 {amplitude:.1f}%"]
+            tags = [board] + (["预览"] if preview else [])
+            results.append(_base_item(q, "overnight", score, signals, risks, pivot=take_profit, stop=stop,
+                                      highlights=highlights, tags=tags,
+                                      extra={"pHi3": round(p3 * 100, 1), "pHi5": round(p5 * 100, 1),
+                                             "takeProfit": take_profit, "board": board,
+                                             "gapRisk": round(gap, 3), "boardRank": position}))
+    results.sort(key=lambda item: (item.get("pHi5") or 0), reverse=True)
+    return results
+
 def _finalize(results, min_score):
     results = [item for item in results if item["score"] >= min_score]
     results.sort(key=lambda item: (item["score"], item["changePercent"]), reverse=True)
@@ -2411,6 +2611,19 @@ def ensure_potential_scan(provider, force=False):
         potential_state.update(scanning=True, lastAttempt=time.time(), provider=provider, progress=0, total=0)
     potential_executor.submit(_run_potential_scan, provider)
 
+def _overnight_note():
+    now = datetime.now(SHANGHAI_TZ)
+    minute = now.hour * 60 + now.minute
+    if now.weekday() >= 5:
+        return "休市：显示最近收盘时的排序，仅供参考"
+    if 570 <= minute < 890:
+        return "14:50 锁定推荐，此前为预览（排序会随行情变化）"
+    if 890 <= minute < 900:
+        return "推荐已锁定：14:50–14:57 买入，次日挂 +3% 止盈"
+    if minute >= 900:
+        return "已收盘：按收盘价排序，次日早盘冲高卖出"
+    return "开盘前：显示上一交易日收盘排序"
+
 def potential_payload(provider="auto"):
     with live_cache_lock:
         cached = live_cache["payload"]
@@ -2423,7 +2636,8 @@ def potential_payload(provider="auto"):
         live = {
             "market": ctx["breadth"], "emotion": ctx["emotion"] or None,
             "lists": {"surge": strategy_surge(ctx), "limit": strategy_limit(ctx),
-                      "leader": strategy_leader(ctx), "tail": strategy_tail(ctx)},
+                      "leader": strategy_leader(ctx), "tail": strategy_tail(ctx),
+                      "overnight": strategy_overnight(ctx)},
             "live": ctx["live"],
         }
         with live_cache_lock:
@@ -2432,13 +2646,15 @@ def potential_payload(provider="auto"):
         state = dict(potential_state)
     lists = dict(live["lists"])
     lists.update(state["lists"])
-    lists["all"] = combine_lists({key: value for key, value in lists.items() if key != "all"})
+    # 尾盘隔夜 has a different holding horizon (one night), so it is not merged into 综合.
+    lists["all"] = combine_lists({key: value for key, value in lists.items() if key not in ("all", "overnight")})
     notes = {
         "surge": None if live["live"] else "非交易时段：显示今日已记录的速拉事件（以收盘价计算承接）",
         "limit": None if live["emotion"] else "涨停池加载中…",
         "pullback": None if lists["pullback"] or state["updatedAt"] else "强势股池与日线首次加载中，需要 1–3 分钟",
         "trend": None if state["updatedAt"] else "日线复核中，首次需要 1–3 分钟",
         "tail": "14:30 前为预览，尾盘结果更有效" if live["live"] and datetime.now(SHANGHAI_TZ).hour * 60 + datetime.now(SHANGHAI_TZ).minute < 870 else None,
+        "overnight": _overnight_note(),
     }
     strategies = [dict(meta, count=len(lists.get(meta["id"], [])), note=notes.get(meta["id"])) for meta in STRATEGY_META]
     updated = state["updatedAt"]
@@ -2787,6 +3003,10 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed.path == "/news":
                     return self.send_json(stock_news(code))
                 return self.send_json(stock_insight(code, params.get("provider", ["auto"])[0]))
+            if parsed.path == "/ohlc":
+                codes = [c for c in params.get("codes", [""])[0].split(",") if len(c) == 6 and c.isdigit()][:200]
+                snapshot = eastmoney_ohlc_snapshot(max_age=20)
+                return self.send_json({code: snapshot[code] for code in codes if code in snapshot})
             if parsed.path == "/history":
                 code = params.get("code", [""])[0]
                 if len(code) != 6 or not code.isdigit(): return self.send_json({"error":"invalid code"}, 400)

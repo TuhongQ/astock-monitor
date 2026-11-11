@@ -488,6 +488,7 @@ struct DashboardView: View {
     @AppStorage("dashboard.alertLayout") private var alertLayout = "split"
     @AppStorage("dashboard.potentialStrategy") private var potentialStrategy = "all"
     @AppStorage("dashboard.showStrategyLogic") private var showStrategyLogic = false
+    @AppStorage("dashboard.overnightBoard") private var overnightBoard = "全部"
     @State private var selectedTableQuote: String?
     @State private var selectedAlertIDs = Set<UUID>()
     @State private var selectedAlertLogDate: Date?
@@ -738,8 +739,13 @@ struct DashboardView: View {
             }
             Picker("分组", selection: $selectedWatchGroup) {
                 Text("全部自选").tag("全部自选")
-                ForEach(store.watch.groups.filter { !$0.hasPrefix(WatchData.pickGroupPrefix) }, id: \.self) { Text($0).tag($0) }
+                ForEach(store.watch.groups.filter { !WatchData.isAutoGroup($0) }, id: \.self) { Text($0).tag($0) }
                 let pickGroups = store.watch.groups.filter { $0.hasPrefix(WatchData.pickGroupPrefix) }.sorted(by: >)
+                let overnightGroups = store.watch.groups.filter { $0.hasPrefix(WatchData.overnightGroupPrefix) }.sorted(by: >)
+                if !overnightGroups.isEmpty {
+                    Divider()
+                    ForEach(overnightGroups, id: \.self) { Text($0).tag($0) }
+                }
                 if !pickGroups.isEmpty {
                     Divider()
                     ForEach(pickGroups, id: \.self) { Text($0).tag($0) }
@@ -755,6 +761,21 @@ struct DashboardView: View {
                 }
                 .font(.caption2).foregroundStyle(.secondary)
                 .help("自推荐价起算的涨跌幅，便于回溯当日推荐效果")
+            }
+            if let summary = store.overnightSummary(forGroup: selectedWatchGroup) {
+                VStack(alignment: .leading, spacing: 2) {
+                    if summary.tracked == 0 {
+                        Text("\(summary.day.suffix(5)) 14:50 锁定 \(summary.count) 只 · 次日挂 +3% 止盈")
+                    } else {
+                        Text("次日冲高 ≥3%：\(summary.hit3)/\(summary.tracked) · ≥5%：\(summary.hit5)/\(summary.tracked)")
+                        HStack(spacing: 6) {
+                            if let open = summary.avgOpen { Text(String(format: "开盘均 %+.2f%%", open)).foregroundStyle(open >= 0 ? Color.red : Color.green) }
+                            if let high = summary.avgHigh { Text(String(format: "最高均 %+.2f%%", high)).foregroundStyle(high >= 0 ? Color.red : Color.green) }
+                        }
+                    }
+                }
+                .font(.caption2).foregroundStyle(.secondary)
+                .help("以 14:50 锁定价为基准，次日开盘价、盘中最高价相对涨跌（东方财富每分钟更新）")
             }
             HStack(spacing: 6) {
                 TextField("输入 6 位代码回车添加", text: $newCode).textFieldStyle(.roundedBorder).onSubmit(add)
@@ -811,6 +832,12 @@ struct DashboardView: View {
                             .font(.system(size: 9, weight: .medium))
                             .foregroundStyle((since ?? 0) >= 0 ? Color.red : Color.green)
                             .help("\(record.day) \(record.pick.time.formatted(date: .omitted, time: .shortened)) 以 \(String(format: "%.2f", record.pick.price)) 推荐，评分 \(record.pick.initialScore)（最新 \(record.pick.score)）；后面为推荐以来涨跌幅")
+                    } else if let record = store.overnightPick(for: code) {
+                        let high = record.pick.nextHighReturn
+                        Text(high.map { String(format: "隔夜高 %+.1f%%", $0) } ?? String(format: "隔夜 ≥5%% %.0f%%", record.pick.pHi5 ?? 0))
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(high.map { $0 >= 3 ? Color.red : Color.green } ?? Color.pink)
+                            .help("\(record.day) 14:50 以 \(String(format: "%.2f", record.pick.price)) 锁定；" + (high == nil ? "估计次日冲高 ≥5% 概率" : "次日最高相对锁定价"))
                     }
                 }
             }
@@ -1203,7 +1230,10 @@ struct DashboardView: View {
         strategies.first { $0.id == potentialStrategy } ?? strategies.first
     }
     private var currentPotentialStocks: [PotentialStock] {
-        store.potentialStocks(for: currentStrategy?.id ?? potentialStrategy)
+        let id = currentStrategy?.id ?? potentialStrategy
+        let stocks = store.potentialStocks(for: id)
+        guard id == "overnight", overnightBoard != "全部" else { return stocks }
+        return stocks.filter { ($0.board ?? WatchData.pickBoard(code: $0.code)) == overnightBoard }
     }
 
     private var recommendationTable: some View {
@@ -1280,6 +1310,7 @@ struct DashboardView: View {
         case "pullback": .teal
         case "leader": .purple
         case "tail": .indigo
+        case "overnight": .mint
         default: .pink
         }
     }
@@ -1312,6 +1343,23 @@ struct DashboardView: View {
             .font(.caption).foregroundStyle(.secondary)
             if let note = currentStrategy?.note {
                 Label(note, systemImage: "info.circle").font(.caption).foregroundStyle(.orange)
+            }
+            if currentStrategy?.id == "overnight" {
+                HStack(spacing: 10) {
+                    Picker("板块", selection: $overnightBoard) {
+                        Text("全部").tag("全部"); Text("主板").tag("主板"); Text("创业科创").tag("创业科创")
+                    }.pickerStyle(.segmented).labelsHidden().frame(width: 220)
+                    if let record = store.overnightTrackRecord() {
+                        Text("实盘跟踪 \(record.picks) 只：次日冲高 ≥3% \(record.hit3) 只（\(Int((Double(record.hit3) / Double(record.picks) * 100).rounded()))%）· ≥5% \(record.hit5) 只"
+                             + (record.avgOpen.map { String(format: " · 开盘均 %+.2f%%", $0) } ?? "")
+                             + (record.avgHigh.map { String(format: " · 最高均 %+.2f%%", $0) } ?? ""))
+                    } else {
+                        Text("14:50 自动锁定后，次日记录开盘 / 最高，用于检验命中率")
+                    }
+                }
+                .font(.caption).foregroundStyle(.secondary)
+                Text("买点 14:50–14:57；卖点：次日挂「止盈」价单，10:30 前未成交或跌破「止损」就卖出。回测显示这类高波动股次日开盘平均低开约 1%，开盘直接卖不划算。")
+                    .font(.caption2).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }
             if store.potentialReport?.market?.regime == "弱势" {
                 Text("弱势市场：各策略评分已统一打折。宜轻仓、只看 A 级，或空仓观望。")
@@ -1412,7 +1460,7 @@ struct DashboardView: View {
                 }
             }.frame(width: 128, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
-                Text(stock.pivot.map { String(format: "观察 %.2f", $0) } ?? "—")
+                Text(stock.pivot.map { String(format: stock.strategy == "overnight" ? "止盈 %.2f" : "观察 %.2f", $0) } ?? "—")
                 Text(stopText).font(.caption2).foregroundStyle(.green)
             }.monospacedDigit().frame(width: 112, alignment: .leading)
             VStack(alignment: .leading, spacing: 3) {
@@ -2320,6 +2368,14 @@ struct SettingsView: View {
                                 Stepper("\(draft.dailyPickLimit) 只", value: $draft.dailyPickLimit, in: 3...30)
                             }
                         }
+                        settingToggle("尾盘隔夜推荐", detail: "14:50 锁定次日冲高概率最高的个股，建分组「隔夜 MM-dd 主板 / 创业科创」并跟踪次日表现", isOn: $draft.autoOvernightPicks)
+                        if draft.autoOvernightPicks {
+                            HStack {
+                                settingLabel("每板块隔夜推荐", detail: "主板、创业科创各自计数")
+                                Spacer()
+                                Stepper("\(draft.overnightPickLimit) 只", value: $draft.overnightPickLimit, in: 3...15)
+                            }
+                        }
                         Text("告警只在交易时段（9:30–11:30、13:00–15:00）触发。涨幅监控自选池，且涨跌幅相对本交易日上一条行情变化至少 0.01 个百分点才告警；涨停事件按「首次封板 → 炸板 → 回封」记录，同一只股票每天只记一次首封，应用重启不会重复；日志附连板数、首封时间、封单和行业，并在日志页汇总涨停 / 炸板 / 连板梯队和涨停板块。速拉监控全市场，比较速拉窗口内的最低价与现价，并标注同行业 10 分钟内的联动只数。均过滤黑名单和停牌股，并分别应用冷却时间。")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         settingToggle("过滤 ST", detail: "不监控 ST 和 *ST 股票", isOn: $draft.filterST)
@@ -2601,7 +2657,7 @@ private struct StockInsightPanel: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 if let grade = pick.grade { gradeBadge(grade) }
-                Text("\(day) \(pick.time.formatted(date: .omitted, time: .shortened)) 推荐")
+                Text("\(day) \(pick.time.formatted(date: .omitted, time: .shortened)) " + (pick.isOvernight ? "尾盘隔夜锁定" : "推荐"))
                     .font(.system(size: 12, weight: .semibold))
                 Text(WatchData.pickBoard(code: pick.code)).font(.caption2).foregroundStyle(.secondary)
                 Spacer()
@@ -2613,7 +2669,19 @@ private struct StockInsightPanel: View {
                 metric("推荐价", String(format: "%.2f", pick.price))
                 metric("现价", current.map { String(format: "%.2f", $0) } ?? "—")
                 metric("推荐以来", since.map { String(format: "%+.2f%%", $0) } ?? "—", tone: since)
-                metric("评分", "\(pick.initialScore) → \(pick.score)")
+                if pick.isOvernight {
+                    metric("冲高≥3% / ≥5%", String(format: "%.0f%% / %.0f%%", pick.pHi3 ?? 0, pick.pHi5 ?? 0))
+                } else {
+                    metric("评分", "\(pick.initialScore) → \(pick.score)")
+                }
+            }
+            if pick.isOvernight, let nextDay = pick.nextDay {
+                HStack(spacing: 12) {
+                    metric("\(nextDay.suffix(5)) 开盘", pick.nextOpenReturn.map { String(format: "%+.2f%%", $0) } ?? "—", tone: pick.nextOpenReturn)
+                    metric("次日最高", pick.nextHighReturn.map { String(format: "%+.2f%%", $0) } ?? "—", tone: pick.nextHighReturn)
+                    metric("次日最新", pick.nextCloseReturn.map { String(format: "%+.2f%%", $0) } ?? "—", tone: pick.nextCloseReturn)
+                    metric("+3% 止盈", (pick.nextHighReturn ?? -99) >= 3 ? "已触及" : "未触及", tone: (pick.nextHighReturn ?? -99) >= 3 ? 1 : -1)
+                }
             }
             if !pick.strategies.isEmpty || !(pick.tags ?? []).isEmpty {
                 chips(Array(Set(pick.strategies.map(strategyTitle) + (pick.tags ?? []))).sorted())
@@ -2625,7 +2693,7 @@ private struct StockInsightPanel: View {
             bulletList(pick.risks ?? [], color: .orange, icon: "exclamationmark.triangle")
             if pick.pivot != nil || pick.stopLoss != nil {
                 HStack(spacing: 12) {
-                    if let pivot = pick.pivot { metric("观察位", String(format: "%.2f", pivot)) }
+                    if let pivot = pick.pivot { metric(pick.isOvernight ? "止盈位" : "观察位", String(format: "%.2f", pivot)) }
                     if let stop = pick.stopLoss {
                         metric("止损参考", String(format: "%.2f", stop) + (pick.riskPercent.map { String(format: "（-%.1f%%）", $0) } ?? ""), tone: -1)
                     }
@@ -2647,7 +2715,7 @@ private struct StockInsightPanel: View {
                 Text(match.title).font(.system(size: 12, weight: .semibold))
                 Text("\(match.score) 分").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                if let pivot = match.pivot { Text(String(format: "观察 %.2f", pivot)).font(.caption2).monospacedDigit() }
+                if let pivot = match.pivot { Text(String(format: match.strategy == "overnight" ? "止盈 %.2f" : "观察 %.2f", pivot)).font(.caption2).monospacedDigit() }
                 if let stop = match.stopLoss { Text(String(format: "止损 %.2f", stop)).font(.caption2).foregroundStyle(.green).monospacedDigit() }
             }
             if !match.highlights.isEmpty {

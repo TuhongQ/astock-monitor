@@ -79,6 +79,8 @@ import AppKit
     @Published private(set) var potentialError: String?
     private var potentialRequestInFlight = false
     private var lastPotentialRequest = Date.distantPast
+    private var lastOvernightTrack = Date.distantPast
+    private var overnightTrackInFlight = false
     private var cachedConceptOptions: [String]?
 
     init() {
@@ -300,6 +302,8 @@ import AppKit
                 potentialReport = report
                 potentialError = nil
                 autoAddDailyPicks(from: report)
+                autoAddOvernightPicks(from: report)
+                trackOvernightOutcomes()
             } catch {
                 potentialError = error.localizedDescription
                 DebugLog.write("潜力股刷新失败：\(error.localizedDescription)")
@@ -665,11 +669,136 @@ import AppKit
         }
     }
 
+    private func minuteOfDay(_ date: Date) -> Int {
+        let parts = aStockCalendar.dateComponents([.hour, .minute], from: date)
+        return (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+    }
+
+    /// 尾盘隔夜: at 14:50–15:00 of a trading day, lock the top `overnightPickLimit`
+    /// stocks of each board (主板 / 创业科创) once. They go into dated 隔夜 groups
+    /// (codes already in the watchlist keep their group but are still recorded).
+    private func autoAddOvernightPicks(from report: PotentialReport) {
+        let now = Date()
+        guard settings.autoOvernightPicks, isAStockTradingSession(at: now),
+              (890..<900).contains(minuteOfDay(now)) else { return }
+        let day = pickDayKey(now)
+        guard watch.overnightByDay[day] == nil else { return }
+        let ranked = report.lists?["overnight"] ?? []
+        guard !ranked.isEmpty else { return }
+        let limit = min(max(settings.overnightPickLimit, 3), 15)
+        let blacklisted = Set(watch.blacklist)
+        var updated = watch
+        var picks: [DailyPick] = []
+        var alreadyWatched: [String: [String]] = [:]
+        for board in WatchData.pickBoards {
+            let candidates = ranked.filter { ($0.board ?? WatchData.pickBoard(code: $0.code)) == board && !blacklisted.contains($0.code) }
+                .filter { stock in
+                    guard let live = quote(for: stock.code) else { return true }
+                    return !live.upperLimit && !live.suspended && !live.isST
+                }
+                .sorted { ($0.pHi5 ?? 0) > ($1.pHi5 ?? 0) }
+            let group = WatchData.overnightGroupName(day: day, board: board)
+            for stock in candidates.prefix(limit) {
+                var pick = DailyPick(code: stock.code, name: stock.name, initialScore: stock.score, score: stock.score,
+                                     price: quote(for: stock.code)?.price ?? stock.price, time: now, strategies: ["overnight"])
+                pick.applySnapshot(stock)
+                pick.kind = "overnight"
+                picks.append(pick)
+                if updated.codes.contains(stock.code) {
+                    alreadyWatched[board, default: []].append(stock.name)
+                } else {
+                    updated.codes.append(stock.code)
+                    updated.groupByCode[stock.code] = group
+                    if !updated.groups.contains(group) { updated.groups.append(group) }
+                }
+            }
+        }
+        guard !picks.isEmpty else { return }
+        updated.overnightByDay[day] = picks
+        pruneOldPickDays(&updated)
+        watch = updated
+        for board in WatchData.pickBoards {
+            let boardPicks = picks.filter { WatchData.pickBoard(code: $0.code) == board }
+            guard !boardPicks.isEmpty else { continue }
+            let group = WatchData.overnightGroupName(day: day, board: board)
+            DebugLog.write("尾盘隔夜锁定（\(board)）：\(boardPicks.map { "\($0.code)\($0.name)(≥5% \(String(format: "%.0f", $0.pHi5 ?? 0))%)" }.joined(separator: ","))")
+            let watched = alreadyWatched[board] ?? []
+            enqueueToast(AlertToast(shortType: "尾盘隔夜", name: boardPicks.prefix(3).map(\.name).joined(separator: "、") + (boardPicks.count > 3 ? " 等" : ""),
+                                    code: boardPicks[0].code,
+                                    effect: "\(board) \(boardPicks.count) 只已锁定到「\(group)」" + (watched.isEmpty ? "" : "（\(watched.joined(separator: "、")) 已在其他分组）") + "，次日挂 +3% 止盈"))
+        }
+    }
+
+    /// Next trading day: record open / high / latest price of the previous day's 隔夜
+    /// picks from Eastmoney (the quote snapshot may lack open / high), once a minute.
+    private func trackOvernightOutcomes() {
+        let now = Date()
+        guard isAStockTradingSession(at: now) || (900..<930).contains(minuteOfDay(now)),
+              !overnightTrackInFlight, now.timeIntervalSince(lastOvernightTrack) >= 60 else { return }
+        let today = pickDayKey(now)
+        guard let day = watch.overnightByDay.keys.filter({ $0 < today }).max(),
+              let picks = watch.overnightByDay[day],
+              picks.contains(where: { $0.nextDay == nil || $0.nextDay == today }) else { return }
+        overnightTrackInFlight = true
+        lastOvernightTrack = now
+        let codes = picks.map(\.code)
+        Task {
+            defer { overnightTrackInFlight = false }
+            guard let ohlc = try? await service.fetchOHLC(codes: codes), !ohlc.isEmpty else { return }
+            var updated = watch
+            guard var current = updated.overnightByDay[day] else { return }
+            for index in current.indices where current[index].nextDay == nil || current[index].nextDay == today {
+                guard let bar = ohlc[current[index].code], let open = bar.open, open > 0 else { continue }
+                current[index].nextDay = today
+                current[index].nextOpen = open
+                current[index].nextHigh = max(bar.high ?? open, current[index].nextHigh ?? 0)
+                current[index].nextClose = bar.price ?? current[index].nextClose
+            }
+            updated.overnightByDay[day] = current
+            if updated.overnightByDay != watch.overnightByDay { watch = updated }
+        }
+    }
+
+    /// The 隔夜 record of a code that still sits in its dated 隔夜 group.
+    func overnightPick(for code: String) -> (day: String, pick: DailyPick)? {
+        guard let group = watch.groupByCode[code], group.hasPrefix(WatchData.overnightGroupPrefix) else { return nil }
+        for (day, picks) in watch.overnightByDay where WatchData.overnightGroupName(day: day, code: code) == group {
+            if let pick = picks.first(where: { $0.code == code }) { return (day, pick) }
+        }
+        return nil
+    }
+
+    /// Review of one dated 隔夜 group: next-day hit rate of the +3% take-profit and average returns.
+    func overnightSummary(forGroup group: String) -> (day: String, count: Int, tracked: Int, hit3: Int, hit5: Int, avgOpen: Double?, avgHigh: Double?, avgClose: Double?)? {
+        guard let (day, board) = watch.overnightByDay.keys.lazy.flatMap({ day in WatchData.pickBoards.map { (day, $0) } })
+                .first(where: { WatchData.overnightGroupName(day: $0.0, board: $0.1) == group }) else { return nil }
+        let picks = (watch.overnightByDay[day] ?? []).filter { WatchData.pickBoard(code: $0.code) == board }
+        guard !picks.isEmpty else { return nil }
+        let tracked = picks.filter { $0.nextOpen != nil }
+        func average(_ values: [Double]) -> Double? { values.isEmpty ? nil : values.reduce(0, +) / Double(values.count) }
+        return (day, picks.count, tracked.count,
+                tracked.filter { ($0.nextHighReturn ?? -99) >= 3 }.count,
+                tracked.filter { ($0.nextHighReturn ?? -99) >= 5 }.count,
+                average(tracked.compactMap(\.nextOpenReturn)), average(tracked.compactMap(\.nextHighReturn)),
+                average(tracked.compactMap(\.nextCloseReturn)))
+    }
+
+    /// All 隔夜 picks so far with next-day results, for the strategy's running track record.
+    func overnightTrackRecord() -> (picks: Int, hit3: Int, hit5: Int, avgOpen: Double?, avgHigh: Double?)? {
+        let tracked = watch.overnightByDay.values.flatMap { $0 }.filter { $0.nextOpen != nil }
+        guard !tracked.isEmpty else { return nil }
+        let opens = tracked.compactMap(\.nextOpenReturn), highs = tracked.compactMap(\.nextHighReturn)
+        return (tracked.count, highs.filter { $0 >= 3 }.count, highs.filter { $0 >= 5 }.count,
+                opens.isEmpty ? nil : opens.reduce(0, +) / Double(opens.count),
+                highs.isEmpty ? nil : highs.reduce(0, +) / Double(highs.count))
+    }
+
     private func limitUpPrice(_ limit: Double) -> Double { limit - 0.01 }
 
     private func watchEquivalent(_ lhs: WatchData, _ rhs: WatchData) -> Bool {
         lhs.codes == rhs.codes && lhs.groups == rhs.groups && lhs.groupByCode == rhs.groupByCode
             && lhs.picksByDay == rhs.picksByDay && lhs.replacedByDay == rhs.replacedByDay
+            && lhs.overnightByDay == rhs.overnightByDay
             && lhs.autoDailyCodes == rhs.autoDailyCodes
     }
 
@@ -728,6 +857,17 @@ import AppKit
 
     /// Keep 30 dated recommendation groups; older ones (and their untouched codes) are removed.
     private func pruneOldPickDays(_ data: inout WatchData) {
+        let overnightDays = data.overnightByDay.keys.sorted()
+        if overnightDays.count > 30 {
+            for day in overnightDays.dropLast(30) {
+                let groups = Set(WatchData.pickBoards.map { WatchData.overnightGroupName(day: day, board: $0) })
+                let codes = Set(data.codes.filter { groups.contains(data.groupByCode[$0] ?? "") })
+                data.codes.removeAll { codes.contains($0) }
+                for code in codes { data.groupByCode.removeValue(forKey: code) }
+                data.groups.removeAll { groups.contains($0) }
+                data.overnightByDay.removeValue(forKey: day)
+            }
+        }
         let days = data.picksByDay.keys.sorted()
         guard days.count > 30 else { return }
         for day in days.dropLast(30) {
@@ -763,8 +903,9 @@ import AppKit
 
     /// Every day a code was recommended (newest first), regardless of its current group.
     func pickHistory(for code: String) -> [(day: String, pick: DailyPick)] {
-        watch.picksByDay.compactMap { day, picks in picks.first { $0.code == code }.map { (day, $0) } }
-            .sorted { $0.day > $1.day }
+        let daily = watch.picksByDay.compactMap { day, picks in picks.first { $0.code == code }.map { (day, $0) } }
+        let overnight = watch.overnightByDay.compactMap { day, picks in picks.first { $0.code == code }.map { (day, $0) } }
+        return (daily + overnight).sorted { ($0.day, $0.pick.time) > ($1.day, $1.pick.time) }
     }
 
     /// Picks of one dated group with the return since recommendation, for review.

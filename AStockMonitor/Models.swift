@@ -73,7 +73,20 @@ struct PotentialStock: Decodable, Identifiable, Hashable {
     let volumeRatio: Double?
     let turnover: Double?
     let amount: Double?
+    /// 尾盘隔夜: estimated probability (%) that tomorrow's high is ≥ 3% / ≥ 5% above the
+    /// current price, the suggested take-profit price and the board it is ranked in.
+    let pHi3: Double?
+    let pHi5: Double?
+    let takeProfit: Double?
+    let board: String?
     var id: String { code }
+}
+
+struct DayOHLC: Decodable, Hashable {
+    let price: Double?
+    let open: Double?
+    let high: Double?
+    let low: Double?
 }
 
 struct PotentialMarket: Decodable, Hashable {
@@ -237,10 +250,14 @@ struct MonitorSettings: Codable {
     var autoAddDailyPicks = true
     /// Maximum recommendations per trading day (stronger picks replace weaker ones).
     var dailyPickLimit = 10
+    /// At 14:50 lock the 尾盘隔夜 top picks of each board into dated 隔夜 groups.
+    var autoOvernightPicks = true
+    var overnightPickLimit = 10
 
     private enum CodingKeys: String, CodingKey {
         case threshold, rapidThreshold, windowSeconds, refreshSeconds, cooldownSeconds, rapidCooldownSeconds, cooldownMinutes, volumeMultiple
         case requireVolume, filterST, filterSuspended, limitMonitorAll, limitToastAll, limitDownAlerts, autoAddDailyPicks, dailyPickLimit
+        case autoOvernightPicks, overnightPickLimit
     }
 
     init() {}
@@ -268,6 +285,8 @@ struct MonitorSettings: Codable {
         limitDownAlerts = try values.decodeIfPresent(Bool.self, forKey: .limitDownAlerts) ?? true
         autoAddDailyPicks = try values.decodeIfPresent(Bool.self, forKey: .autoAddDailyPicks) ?? true
         dailyPickLimit = min(max(try values.decodeIfPresent(Int.self, forKey: .dailyPickLimit) ?? 10, 3), 30)
+        autoOvernightPicks = try values.decodeIfPresent(Bool.self, forKey: .autoOvernightPicks) ?? true
+        overnightPickLimit = min(max(try values.decodeIfPresent(Int.self, forKey: .overnightPickLimit) ?? 10, 3), 15)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -287,6 +306,8 @@ struct MonitorSettings: Codable {
         try values.encode(limitDownAlerts, forKey: .limitDownAlerts)
         try values.encode(autoAddDailyPicks, forKey: .autoAddDailyPicks)
         try values.encode(dailyPickLimit, forKey: .dailyPickLimit)
+        try values.encode(autoOvernightPicks, forKey: .autoOvernightPicks)
+        try values.encode(overnightPickLimit, forKey: .overnightPickLimit)
     }
 }
 struct FilterCriteria: Codable {
@@ -329,6 +350,22 @@ struct DailyPick: Codable, Hashable {
     var changePercent: Double? = nil
     /// True when the snapshot was filled in after the pick (older records).
     var backfilled: Bool? = nil
+    /// "overnight" for 尾盘隔夜 picks (bought ~14:50, sold on the next morning's rally).
+    var kind: String? = nil
+    var pHi3: Double? = nil
+    var pHi5: Double? = nil
+    var takeProfit: Double? = nil
+    /// Outcome on the next trading day: open / high / latest (close after 15:00).
+    var nextDay: String? = nil
+    var nextOpen: Double? = nil
+    var nextHigh: Double? = nil
+    var nextClose: Double? = nil
+
+    var isOvernight: Bool { kind == "overnight" }
+    /// Next-day returns versus the pick price, in percent.
+    var nextOpenReturn: Double? { nextOpen.flatMap { price > 0 ? ($0 / price - 1) * 100 : nil } }
+    var nextHighReturn: Double? { nextHigh.flatMap { price > 0 ? ($0 / price - 1) * 100 : nil } }
+    var nextCloseReturn: Double? { nextClose.flatMap { price > 0 ? ($0 / price - 1) * 100 : nil } }
 
     mutating func applySnapshot(_ stock: PotentialStock) {
         grade = stock.grade; signals = stock.signals; risks = stock.risks
@@ -336,6 +373,9 @@ struct DailyPick: Codable, Hashable {
         stopLoss = stock.stopLoss; riskPercent = stock.riskPercent
         industry = stock.industry; changePercent = stock.changePercent
         if strategies.isEmpty { strategies = stock.strategies ?? [] }
+        if stock.strategy == "overnight" {
+            kind = "overnight"; pHi3 = stock.pHi3; pHi5 = stock.pHi5; takeProfit = stock.takeProfit
+        }
     }
 }
 
@@ -381,6 +421,8 @@ struct WatchData: Codable {
     var picksByDay: [String: [DailyPick]] = [:]
     /// Codes swapped out on a day; they are not re-added the same day.
     var replacedByDay: [String: [String]] = [:]
+    /// 尾盘隔夜 picks locked at 14:50, keyed by trading day, with next-day outcome.
+    var overnightByDay: [String: [DailyPick]] = [:]
 
     static let legacyAutoDailyGroup = "当日自选"
     static let pickGroupPrefix = "推荐 "
@@ -394,8 +436,13 @@ struct WatchData: Codable {
     static func pickGroupName(day: String, code: String) -> String { pickGroupName(day: day, board: pickBoard(code: code)) }
     /// One-group-per-day name used before the board split.
     static func legacyPickGroupName(day: String) -> String { pickGroupPrefix + String(day.suffix(5)) }
+    static let overnightGroupPrefix = "隔夜 "
+    static func overnightGroupName(day: String, board: String) -> String { overnightGroupPrefix + String(day.suffix(5)) + " " + board }
+    static func overnightGroupName(day: String, code: String) -> String { overnightGroupName(day: day, board: pickBoard(code: code)) }
+    /// Dated groups created automatically (推荐 / 隔夜), listed apart from the user's own groups.
+    static func isAutoGroup(_ name: String) -> Bool { name.hasPrefix(pickGroupPrefix) || name.hasPrefix(overnightGroupPrefix) }
 
-    private enum CodingKeys: String, CodingKey { case codes, blacklist, groups, groupByCode, conceptsByCode, menuBarCodes, autoDailyCodes, autoDailyDay, picksByDay, replacedByDay }
+    private enum CodingKeys: String, CodingKey { case codes, blacklist, groups, groupByCode, conceptsByCode, menuBarCodes, autoDailyCodes, autoDailyDay, picksByDay, replacedByDay, overnightByDay }
     init() {}
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -409,6 +456,7 @@ struct WatchData: Codable {
         autoDailyDay = try values.decodeIfPresent(String.self, forKey: .autoDailyDay) ?? ""
         picksByDay = try values.decodeIfPresent([String: [DailyPick]].self, forKey: .picksByDay) ?? [:]
         replacedByDay = try values.decodeIfPresent([String: [String]].self, forKey: .replacedByDay) ?? [:]
+        overnightByDay = try values.decodeIfPresent([String: [DailyPick]].self, forKey: .overnightByDay) ?? [:]
         if groups.isEmpty { groups = ["默认分组"] }
     }
 }

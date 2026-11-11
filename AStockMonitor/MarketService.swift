@@ -163,6 +163,10 @@ actor MarketService {
     func fetchInsight(code: String, provider: String) async throws -> StockInsight {
         try await getJSON(path: "/stock-insight", query: ["code": code, "provider": provider], timeout: 60)
     }
+    /// Open / high / low / price from Eastmoney for next-day tracking of 隔夜 picks.
+    func fetchOHLC(codes: [String]) async throws -> [String: DayOHLC] {
+        try await getJSON(path: "/ohlc", query: ["codes": codes.joined(separator: ",")], timeout: 20)
+    }
     func fetchNews(code: String) async throws -> [StockNewsItem] {
         try await getJSON(path: "/news", query: ["code": code], timeout: 30)
     }
