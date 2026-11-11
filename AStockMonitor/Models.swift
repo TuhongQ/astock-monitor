@@ -93,7 +93,10 @@ struct StockAnalysis: Decodable {
     struct FlowToday: Decodable, Hashable {
         let main: Double?; let mainIn: Double?; let mainOut: Double?; let superLarge: Double?; let large: Double?
         let medium: Double?; let small: Double?; let mainRatio: Double?; let retail: Double?
+        let retailIn: Double?; let retailOut: Double?
+        let table: [FlowRow]?
     }
+    struct FlowRow: Decodable, Hashable { let name: String; let inflow: Double?; let outflow: Double?; let net: Double?; let netRatio: Double? }
     struct FlowMinute: Decodable, Hashable { let t: String; let main: Double?; let small: Double?; let medium: Double?; let large: Double?; let superLarge: Double? }
     struct FlowDay: Decodable, Hashable {
         let date: String; let main: Double?; let small: Double?; let medium: Double?; let large: Double?; let superLarge: Double?

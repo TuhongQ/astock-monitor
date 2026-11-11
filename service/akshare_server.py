@@ -28,7 +28,7 @@ socket.setdefaulttimeout(10)
 
 HOST, PORT, CACHE_SECONDS = "127.0.0.1", 8767, 1.5
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-API_VERSION = 23
+API_VERSION = 24
 INDEX_SYMBOLS = {
     "sh000001": "上证指数", "sz399001": "深证成指",
     "sz399006": "创业板指", "sh000680": "科创综指",
@@ -3068,10 +3068,27 @@ def analysis_extras(code, history):
     flow_today = None
     if main is not None:
         amount = num(q.get("f48")) or 0
-        flow_today = {"main": main, "mainIn": num(q.get("f135")), "mainOut": num(q.get("f136")),
-                      "superLarge": num(q.get("f140")), "large": num(q.get("f143")), "medium": num(q.get("f146")),
-                      "small": num(q.get("f149")), "mainRatio": main / amount * 100 if amount else None,
-                      "retail": (num(q.get("f146")) or 0) + (num(q.get("f149")) or 0)}
+        def side(inflow, outflow, net):
+            return {"inflow": num(q.get(inflow)), "outflow": num(q.get(outflow)), "net": num(q.get(net))}
+        detail = {"superLarge": side("f138", "f139", "f140"), "large": side("f141", "f142", "f143"),
+                  "medium": side("f144", "f145", "f146"), "small": side("f147", "f148", "f149")}
+        def combine(*keys):
+            total = {"inflow": 0.0, "outflow": 0.0, "net": 0.0}
+            for key in keys:
+                for field in total:
+                    total[field] += detail[key][field] or 0
+            return total
+        main_side = {"inflow": num(q.get("f135")), "outflow": num(q.get("f136")), "net": main}
+        retail_side = combine("medium", "small")
+        rows = [("主力", main_side), ("超大单", detail["superLarge"]), ("大单", detail["large"]),
+                ("散户", retail_side), ("中单", detail["medium"]), ("小单", detail["small"])]
+        flow_today = {"main": main, "mainIn": main_side["inflow"], "mainOut": main_side["outflow"],
+                      "superLarge": detail["superLarge"]["net"], "large": detail["large"]["net"],
+                      "medium": detail["medium"]["net"], "small": detail["small"]["net"],
+                      "mainRatio": main / amount * 100 if amount else None,
+                      "retail": retail_side["net"], "retailIn": retail_side["inflow"], "retailOut": retail_side["outflow"],
+                      "table": [{"name": name, "inflow": row["inflow"], "outflow": row["outflow"], "net": row["net"],
+                                 "netRatio": (row["net"] or 0) / amount * 100 if amount else None} for name, row in rows]}
     minutes = []
     for line in (results["minuteFlow"].get("klines") or []):
         f = line.split(",")

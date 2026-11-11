@@ -3094,6 +3094,10 @@ struct StockAnalysisPage: View {
                 .padding(10).frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 8).fill(color.opacity(0.08)))
         }
+        if let code = r.code, store.quote(for: code) != nil {
+            AnalysisQuotePanel(store: store, code: code).padding(12)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.03)))
+        }
         if !(r.daily ?? []).isEmpty || !(r.intraday?.points ?? []).isEmpty {
             AnalysisChartPanel(result: r).padding(12)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.03)))
@@ -3404,19 +3408,58 @@ struct AnalysisFlowPanel: View {
                             big("散户净流入", today.retail, sub: "中单 + 小单")
                         }
                         breakdown(today)
-                        if let inflow = today.mainIn, let outflow = today.mainOut {
-                            Text("主力流入 \(analysisYuan(inflow).replacingOccurrences(of: "+", with: "")) · 流出 \(analysisYuan(outflow).replacingOccurrences(of: "+", with: ""))")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
                     }
                     .frame(width: 300, alignment: .leading)
                     minuteChart.frame(maxWidth: .infinity)
                 }
+                if let table = today.table, !table.isEmpty { flowTable(table) }
             } else {
                 Text("暂无今日资金流数据").font(.caption).foregroundStyle(.secondary)
             }
             if !flow.days.isEmpty { dayChart }
         }
+    }
+
+    /// 流入 / 流出 / 净额 for main force, retail and each order size.
+    private func flowTable(_ rows: [StockAnalysis.FlowRow]) -> some View {
+        let plain: (Double?) -> String = { value in analysisYuan(value).replacingOccurrences(of: "+", with: "") }
+        return VStack(spacing: 0) {
+            HStack {
+                Text("类别").frame(width: 70, alignment: .leading)
+                Text("流入").frame(maxWidth: .infinity, alignment: .trailing)
+                Text("流出").frame(maxWidth: .infinity, alignment: .trailing)
+                Text("净额").frame(maxWidth: .infinity, alignment: .trailing)
+                Text("净额占成交额").frame(maxWidth: .infinity, alignment: .trailing)
+                Text("流入占比").frame(width: 150, alignment: .leading).padding(.leading, 12)
+            }
+            .font(.caption.bold()).foregroundStyle(.secondary).padding(.vertical, 5).padding(.horizontal, 8)
+            .background(Color.primary.opacity(0.05))
+            ForEach(rows, id: \.self) { row in
+                let group = row.name == "主力" || row.name == "散户"
+                let total = (row.inflow ?? 0) + (row.outflow ?? 0)
+                let share = total > 0 ? (row.inflow ?? 0) / total : 0.5
+                HStack {
+                    Text(group ? row.name : "  " + row.name).font(group ? .callout.bold() : .callout).frame(width: 70, alignment: .leading)
+                    Text(plain(row.inflow)).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .trailing)
+                    Text(plain(row.outflow)).foregroundStyle(.green).frame(maxWidth: .infinity, alignment: .trailing)
+                    Text(analysisYuan(row.net)).bold().foregroundStyle((row.net ?? 0) >= 0 ? Color.red : Color.green)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    Text(row.netRatio.map { String(format: "%+.2f%%", $0) } ?? "—").foregroundStyle((row.netRatio ?? 0) >= 0 ? Color.red : Color.green)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    GeometryReader { geo in
+                        HStack(spacing: 0) {
+                            Rectangle().fill(Color.red.opacity(0.65)).frame(width: geo.size.width * CGFloat(share))
+                            Rectangle().fill(Color.green.opacity(0.65))
+                        }
+                    }
+                    .frame(width: 110, height: 8).clipShape(Capsule()).padding(.leading, 12)
+                    Text(String(format: "%.0f%%", share * 100)).font(.caption2).foregroundStyle(.secondary).frame(width: 30, alignment: .trailing)
+                }
+                .font(.callout.monospacedDigit()).padding(.vertical, 4).padding(.horizontal, 8)
+                .background(group ? Color.primary.opacity(0.03) : Color.clear)
+            }
+        }
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.08)))
     }
 
     private func big(_ title: String, _ value: Double?, sub: String?) -> some View {
@@ -3537,6 +3580,71 @@ struct AnalysisStatsPanel: View {
             Text(level.price.map { String(format: "%.2f", $0) } ?? "—").font(.caption.monospacedDigit()).foregroundStyle(color)
             Spacer()
             Text(level.volume.map { String(format: "%.0f", $0) } ?? "—").font(.caption.monospacedDigit())
+        }
+    }
+}
+
+/// Live row from the 行情 table (refreshes every few seconds with the market snapshot).
+struct AnalysisQuotePanel: View {
+    @ObservedObject var store: MonitorStore
+    let code: String
+
+    var body: some View {
+        if let q = store.quote(for: code) {
+            let change = q.changePercent
+            let prev = q.prevClose ?? (change > -100 ? q.price / (1 + change / 100) : q.price)
+            let recent = store.recentChange(for: code)
+            let concepts = (q.concept ?? "").split(whereSeparator: { "、,，;；".contains($0) }).map(String.init).filter { !$0.isEmpty }
+                + store.concepts(for: code)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("行情数据").font(.headline)
+                    Circle().fill(Color.green).frame(width: 6, height: 6)
+                    Text("实时 · \(q.timestamp.formatted(date: .omitted, time: .standard))").font(.caption2).foregroundStyle(.secondary)
+                }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 112), spacing: 8)], alignment: .leading, spacing: 8) {
+                    cell("现价", String(format: "%.2f", q.price), tone: change)
+                    cell("涨跌幅", String(format: "%+.2f%%", change), tone: change)
+                    cell("涨跌额", String(format: "%+.2f", q.price - prev), tone: change)
+                    cell("3 分钟涨速", recent.map { String(format: "%+.2f%%", $0) } ?? "—", tone: recent)
+                    cell("今开", price(q.open), tone: q.open.map { $0 - prev })
+                    cell("最高", price(q.high), tone: q.high.map { $0 - prev })
+                    cell("最低", price(q.low), tone: q.low.map { $0 - prev })
+                    cell("昨收", price(prev))
+                    cell("涨停价", price(q.limitUpPrice), tone: 1)
+                    cell("跌停价", price(q.limitDownPrice), tone: -1)
+                    cell("成交量", q.volume > 0 ? (q.volume >= 1e4 ? String(format: "%.1f 万手", q.volume / 1e4) : String(format: "%.0f 手", q.volume)) : "—")
+                    cell("成交额", analysisYuan(q.amount).replacingOccurrences(of: "+", with: ""))
+                    cell("量比", q.volumeRatio.map { String(format: "%.2f", $0) } ?? "—", tone: q.volumeRatio.map { $0 - 1.5 })
+                    cell("换手率", q.turnover.map { String(format: "%.2f%%", $0) } ?? "—")
+                    cell("总市值", analysisYuan(q.totalMarketCap).replacingOccurrences(of: "+", with: ""))
+                    cell("流通市值", analysisYuan(q.floatMarketCap).replacingOccurrences(of: "+", with: ""))
+                    cell(q.annualReportYear.map { "\($0) 年度盈亏" } ?? "年度盈亏", analysisYuan(q.annualNetProfit), tone: q.annualNetProfit)
+                    cell(q.quarterlyReportLabel.map { "\($0) 盈亏" } ?? "季度盈亏", analysisYuan(q.quarterlyNetProfit), tone: q.quarterlyNetProfit)
+                    cell("板块", q.board)
+                    cell("行业", q.industry?.isEmpty == false ? q.industry! : (q.limitIndustry ?? "—"))
+                    if q.upperLimit || q.limitStreak != nil || q.firstLimitTime != nil {
+                        cell("涨停状态", q.upperLimit ? ((q.limitStreak ?? 1) > 1 ? "\(q.limitStreak!) 连板" : "封板") : "炸板", tone: q.upperLimit ? 1 : 0)
+                        cell("首次封板", q.firstLimitTime.map { String($0.prefix(5)) } ?? "—")
+                        cell("炸板次数", q.limitOpenCount.map(String.init) ?? "—")
+                        cell("封单金额", analysisYuan(q.sealAmount).replacingOccurrences(of: "+", with: ""))
+                    }
+                }
+                if !concepts.isEmpty {
+                    Text("概念：" + Array(NSOrderedSet(array: concepts)).compactMap { $0 as? String }.joined(separator: "、"))
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func price(_ value: Double?) -> String { value.map { String(format: "%.2f", $0) } ?? "—" }
+
+    private func cell(_ title: String, _ value: String, tone: Double? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 13, weight: .semibold)).monospacedDigit().lineLimit(1)
+                .foregroundStyle(tone.map { $0 > 0 ? Color.red : ($0 < 0 ? Color.green : Color.primary) } ?? Color.primary)
         }
     }
 }
