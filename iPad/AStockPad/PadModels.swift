@@ -154,6 +154,11 @@ struct StockPick: Identifiable, Hashable {
     var stopLoss: Double?
     var riskPercent: Double?
     var buyable: Bool = true
+    /// 尾盘隔夜 only: estimated chance (%) that tomorrow's high is ≥ 3% / ≥ 5% above the price.
+    var pHi3: Double? = nil
+    var pHi5: Double? = nil
+    var takeProfit: Double? = nil
+    var board: String? = nil
     var id: String { code }
 }
 
@@ -205,13 +210,29 @@ struct DailyPick: Codable, Hashable {
     var stopLoss: Double?
     var riskPercent: Double?
     var industry: String
+    /// "overnight" for 尾盘隔夜 picks and their next-day outcome (all optional so
+    /// records saved by older builds still decode).
+    var kind: String? = nil
+    var pHi3: Double? = nil
+    var pHi5: Double? = nil
+    var takeProfit: Double? = nil
+    var nextDay: String? = nil
+    var nextOpen: Double? = nil
+    var nextHigh: Double? = nil
+    var nextClose: Double? = nil
 
     init(pick: StockPick, price: Double, time: Date) {
         code = pick.code; name = pick.name; initialScore = pick.score; score = pick.score
         self.price = price; self.time = time; strategies = pick.strategies; grade = pick.grade
         signals = pick.signals; risks = pick.risks; highlights = pick.highlights; tags = pick.tags
         pivot = pick.pivot; stopLoss = pick.stopLoss; riskPercent = pick.riskPercent; industry = pick.industry
+        if pick.strategy == "overnight" { kind = "overnight"; pHi3 = pick.pHi3; pHi5 = pick.pHi5; takeProfit = pick.takeProfit }
     }
+
+    var isOvernight: Bool { kind == "overnight" }
+    var nextOpenReturn: Double? { nextOpen.flatMap { price > 0 ? ($0 / price - 1) * 100 : nil } }
+    var nextHighReturn: Double? { nextHigh.flatMap { price > 0 ? ($0 / price - 1) * 100 : nil } }
+    var nextCloseReturn: Double? { nextClose.flatMap { price > 0 ? ($0 / price - 1) * 100 : nil } }
 }
 
 struct PadSettings: Codable, Equatable {
@@ -226,6 +247,18 @@ struct PadSettings: Codable, Equatable {
     var autoPicks = true
     var dailyPickLimit = 10
     var filterST = true
+    /// Optional so settings saved by older builds still decode.
+    var overnightEnabled: Bool? = nil
+    var overnightLimitValue: Int? = nil
+
+    var autoOvernight: Bool {
+        get { overnightEnabled ?? true }
+        set { overnightEnabled = newValue }
+    }
+    var overnightLimit: Int {
+        get { min(max(overnightLimitValue ?? 10, 3), 15) }
+        set { overnightLimitValue = newValue }
+    }
 }
 
 struct WatchData: Codable, Equatable {
@@ -235,8 +268,14 @@ struct WatchData: Codable, Equatable {
     var blacklist: [String] = []
     var picksByDay: [String: [DailyPick]] = [:]
     var replacedByDay: [String: [String]] = [:]
+    /// 尾盘隔夜 picks locked at 14:50 by trading day (optional for older saves).
+    var overnightByDay: [String: [DailyPick]]? = nil
 
     static let pickGroupPrefix = "推荐 "
+    static let overnightGroupPrefix = "隔夜 "
+    static func overnightGroupName(day: String, board: String) -> String { overnightGroupPrefix + String(day.suffix(5)) + " " + board }
+    static func overnightGroupName(day: String, code: String) -> String { overnightGroupName(day: day, board: pickBoard(code: code)) }
+    static func isAutoGroup(_ name: String) -> Bool { name.hasPrefix(pickGroupPrefix) || name.hasPrefix(overnightGroupPrefix) }
     static let pickBoards = ["主板", "创业科创"]
     static func pickBoard(code: String) -> String {
         code.hasPrefix("688") || code.hasPrefix("689") || code.hasPrefix("300") || code.hasPrefix("301") ? "创业科创" : "主板"

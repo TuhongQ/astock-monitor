@@ -142,9 +142,12 @@ final class PadStore: ObservableObject {
         updated["limit"] = QuantEngine.limit(ctx)
         updated["leader"] = QuantEngine.leader(ctx)
         updated["tail"] = QuantEngine.tail(ctx)
+        updated["overnight"] = QuantEngine.overnight(ctx)
         updated["all"] = QuantEngine.combine(updated)
         lists = updated
         autoAddPicks()
+        autoAddOvernight()
+        trackOvernight()
     }
 
     /// Daily-bar strategies: fetch bars for candidates (cached), then score.
@@ -399,7 +402,113 @@ final class PadStore: ObservableObject {
     }
 
     func pickHistory(_ code: String) -> [(day: String, pick: DailyPick)] {
-        watch.picksByDay.compactMap { day, picks in picks.first { $0.code == code }.map { (day, $0) } }.sorted { $0.day > $1.day }
+        let daily = watch.picksByDay.compactMap { day, picks in picks.first { $0.code == code }.map { (day, $0) } }
+        let overnight = (watch.overnightByDay ?? [:]).compactMap { day, picks in picks.first { $0.code == code }.map { (day, $0) } }
+        return (daily + overnight).sorted { ($0.day, $0.pick.time) > ($1.day, $1.pick.time) }
+    }
+
+    // MARK: 尾盘隔夜 (14:50 锁定，次日跟踪)
+
+    /// At 14:50–15:00 lock the top `overnightLimit` 尾盘隔夜 picks of each board once.
+    private func autoAddOvernight() {
+        let now = Date()
+        guard settings.autoOvernight, Market.isSession(now), (890..<900).contains(Market.minuteOfDay(now)) else { return }
+        let day = Market.dayKey(now)
+        guard watch.overnightByDay?[day] == nil else { return }
+        let ranked = lists["overnight"] ?? []
+        guard !ranked.isEmpty else { return }
+        var updated = watch
+        var picks: [DailyPick] = []
+        var watched: [String: [String]] = [:]
+        for board in WatchData.pickBoards {
+            let group = WatchData.overnightGroupName(day: day, board: board)
+            let candidates = ranked.filter { ($0.board ?? WatchData.pickBoard(code: $0.code)) == board && !updated.blacklist.contains($0.code) }
+                .filter { byCode[$0.code].map { !$0.upperLimit && !$0.suspended && !$0.isST } ?? true }
+            for stock in candidates.prefix(settings.overnightLimit) {
+                picks.append(DailyPick(pick: stock, price: byCode[stock.code]?.price ?? stock.price, time: now))
+                if updated.codes.contains(stock.code) {
+                    watched[board, default: []].append(stock.name)
+                } else {
+                    updated.codes.append(stock.code)
+                    updated.groupByCode[stock.code] = group
+                    if !updated.groups.contains(group) { updated.groups.append(group) }
+                }
+            }
+        }
+        guard !picks.isEmpty else { return }
+        var byDay = updated.overnightByDay ?? [:]
+        byDay[day] = picks
+        for old in byDay.keys.sorted().dropLast(30) {
+            let groups = Set(WatchData.pickBoards.map { WatchData.overnightGroupName(day: old, board: $0) })
+            let codes = Set(updated.codes.filter { groups.contains(updated.groupByCode[$0] ?? "") })
+            updated.codes.removeAll { codes.contains($0) }
+            for code in codes { updated.groupByCode.removeValue(forKey: code) }
+            updated.groups.removeAll { groups.contains($0) }
+            byDay.removeValue(forKey: old)
+        }
+        updated.overnightByDay = byDay
+        watch = updated
+        for board in WatchData.pickBoards {
+            let boardPicks = picks.filter { WatchData.pickBoard(code: $0.code) == board }
+            guard let first = boardPicks.first else { continue }
+            let others = watched[board] ?? []
+            enqueue(Banner(kind: "尾盘隔夜", name: boardPicks.prefix(3).map(\.name).joined(separator: "、") + (boardPicks.count > 3 ? " 等" : ""),
+                           code: first.code,
+                           text: "\(board) \(boardPicks.count) 只锁定到「\(WatchData.overnightGroupName(day: day, board: board))」"
+                               + (others.isEmpty ? "" : "（\(others.joined(separator: "、")) 已在其他分组）") + "，次日挂 +3% 止盈"))
+        }
+    }
+
+    /// Next trading day: record open / high / latest of the previous day's 隔夜 picks from the live snapshot.
+    private func trackOvernight() {
+        let now = Date()
+        guard Market.isSession(now) || (900..<930).contains(Market.minuteOfDay(now)), var byDay = watch.overnightByDay else { return }
+        let today = Market.dayKey(now)
+        guard let day = byDay.keys.filter({ $0 < today }).max(), var picks = byDay[day] else { return }
+        var changed = false
+        for i in picks.indices where picks[i].nextDay == nil || picks[i].nextDay == today {
+            guard let q = byCode[picks[i].code], let open = q.open, open > 0, q.price > 0 else { continue }
+            let high = max(q.high ?? q.price, picks[i].nextHigh ?? 0)
+            if picks[i].nextDay != today || picks[i].nextOpen != open || picks[i].nextHigh != high || picks[i].nextClose != q.price {
+                picks[i].nextDay = today; picks[i].nextOpen = open; picks[i].nextHigh = high; picks[i].nextClose = q.price
+                changed = true
+            }
+        }
+        guard changed else { return }
+        byDay[day] = picks
+        watch.overnightByDay = byDay
+    }
+
+    func overnightPick(_ code: String) -> (day: String, pick: DailyPick)? {
+        guard let group = watch.groupByCode[code], group.hasPrefix(WatchData.overnightGroupPrefix) else { return nil }
+        for (day, picks) in watch.overnightByDay ?? [:] where WatchData.overnightGroupName(day: day, code: code) == group {
+            if let pick = picks.first(where: { $0.code == code }) { return (day, pick) }
+        }
+        return nil
+    }
+
+    func overnightSummary(group: String) -> (day: String, count: Int, tracked: Int, hit3: Int, hit5: Int, avgOpen: Double?, avgHigh: Double?)? {
+        for (day, picks) in watch.overnightByDay ?? [:] {
+            for board in WatchData.pickBoards where WatchData.overnightGroupName(day: day, board: board) == group {
+                let members = picks.filter { WatchData.pickBoard(code: $0.code) == board }
+                guard !members.isEmpty else { return nil }
+                let tracked = members.filter { $0.nextOpen != nil }
+                func avg(_ v: [Double]) -> Double? { v.isEmpty ? nil : v.reduce(0, +) / Double(v.count) }
+                return (day, members.count, tracked.count,
+                        tracked.filter { ($0.nextHighReturn ?? -99) >= 3 }.count, tracked.filter { ($0.nextHighReturn ?? -99) >= 5 }.count,
+                        avg(tracked.compactMap(\.nextOpenReturn)), avg(tracked.compactMap(\.nextHighReturn)))
+            }
+        }
+        return nil
+    }
+
+    func overnightTrackRecord() -> (picks: Int, hit3: Int, hit5: Int, avgOpen: Double?, avgHigh: Double?)? {
+        let tracked = (watch.overnightByDay ?? [:]).values.flatMap { $0 }.filter { $0.nextOpen != nil }
+        guard !tracked.isEmpty else { return nil }
+        let opens = tracked.compactMap(\.nextOpenReturn), highs = tracked.compactMap(\.nextHighReturn)
+        return (tracked.count, highs.filter { $0 >= 3 }.count, highs.filter { $0 >= 5 }.count,
+                opens.isEmpty ? nil : opens.reduce(0, +) / Double(opens.count),
+                highs.isEmpty ? nil : highs.reduce(0, +) / Double(highs.count))
     }
 
     func picksSummary(group: String) -> (count: Int, average: Double?, winners: Int)? {

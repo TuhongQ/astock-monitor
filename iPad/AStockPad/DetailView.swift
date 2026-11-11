@@ -64,8 +64,8 @@ struct StockDetailView: View {
                     HStack(spacing: 6) {
                         Text(quote?.name ?? code).font(.title2.bold())
                         if let record = store.pickHistory(code).first {
-                            Text("推荐 \(String(record.day.suffix(5)))").font(.caption.bold()).foregroundStyle(.white)
-                                .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(Color.orange))
+                            Text((record.pick.isOvernight ? "隔夜 " : "推荐 ") + String(record.day.suffix(5))).font(.caption.bold()).foregroundStyle(.white)
+                                .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(record.pick.isOvernight ? Color.mint : Color.orange))
                         }
                     }
                     Text("\(code) · \(quote?.industry ?? "") · \(quote?.board ?? "")").font(.caption).foregroundStyle(.secondary)
@@ -239,21 +239,33 @@ struct StockDetailView: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 grade(pick.grade)
-                Text("\(day) \(pick.time.formatted(date: .omitted, time: .shortened)) 推荐").font(.subheadline.bold())
+                Text("\(day) \(pick.time.formatted(date: .omitted, time: .shortened)) " + (pick.isOvernight ? "尾盘隔夜锁定" : "推荐")).font(.subheadline.bold())
                 Text(WatchData.pickBoard(code: pick.code)).font(.caption2).foregroundStyle(.secondary)
             }
             HStack(spacing: 16) {
                 metric("推荐价", Fmt.price(pick.price))
                 metric("现价", Fmt.price(quote?.price))
                 metric("推荐以来", Fmt.pct(since), tone: since)
-                metric("评分", "\(pick.initialScore) → \(pick.score)")
+                if pick.isOvernight {
+                    metric("冲高≥3% / ≥5%", String(format: "%.0f%% / %.0f%%", pick.pHi3 ?? 0, pick.pHi5 ?? 0))
+                } else {
+                    metric("评分", "\(pick.initialScore) → \(pick.score)")
+                }
+            }
+            if pick.isOvernight, let nextDay = pick.nextDay {
+                HStack(spacing: 16) {
+                    metric("\(nextDay.suffix(5)) 开盘", Fmt.pct(pick.nextOpenReturn), tone: pick.nextOpenReturn)
+                    metric("次日最高", Fmt.pct(pick.nextHighReturn), tone: pick.nextHighReturn)
+                    metric("次日最新", Fmt.pct(pick.nextCloseReturn), tone: pick.nextCloseReturn)
+                    metric("+3% 止盈", (pick.nextHighReturn ?? -99) >= 3 ? "已触及" : "未触及", tone: (pick.nextHighReturn ?? -99) >= 3 ? 1 : -1)
+                }
             }
             chips(Array(Set(pick.strategies.compactMap { QuantEngine.titles[$0] } + pick.tags)).sorted())
             if !pick.highlights.isEmpty { Text(pick.highlights.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary) }
             bullets(pick.signals, icon: "checkmark.circle", color: .primary)
             bullets(pick.risks, icon: "exclamationmark.triangle", color: .orange)
             HStack(spacing: 16) {
-                if let pivot = pick.pivot { metric("观察位", Fmt.price(pivot)) }
+                if let pivot = pick.pivot { metric(pick.isOvernight ? "止盈位" : "观察位", Fmt.price(pivot)) }
                 if let stop = pick.stopLoss { metric("止损参考", Fmt.price(stop) + (pick.riskPercent.map { String(format: "（-%.1f%%）", $0) } ?? ""), tone: -1) }
             }
         }
@@ -269,7 +281,7 @@ struct StockDetailView: View {
                 Text(QuantEngine.titles[p.strategy] ?? p.strategy).font(.subheadline.bold())
                 Text("\(p.score) 分").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                if let pivot = p.pivot { Text("观察 \(Fmt.price(pivot))").font(.caption2) }
+                if let pivot = p.pivot { Text((p.strategy == "overnight" ? "止盈 " : "观察 ") + Fmt.price(pivot)).font(.caption2) }
                 if let stop = p.stopLoss { Text("止损 \(Fmt.price(stop))").font(.caption2).foregroundStyle(.green) }
             }
             if !p.highlights.isEmpty { Text(p.highlights.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary) }

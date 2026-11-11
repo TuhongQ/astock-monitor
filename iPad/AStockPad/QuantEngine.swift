@@ -250,6 +250,8 @@ enum QuantEngine {
                      description: "按中位涨幅、前五强均值和涨停家数给东财行业打热度，取最热的 6 个行业；在板块内按涨幅、成交额、是否涨停及封板早晚、盘中涨速挑出前两名。"),
         StrategyMeta(id: "tail", title: "尾盘潜伏", icon: "moon.stars.fill", summary: "14:30 后温和放量、收在高位",
                      description: "涨 2.5%–6%、量比 ≥ 1.2、换手 3%–12%、流通 30–300 亿、收在日内高位，午后 5 分钟线稳步走高、日线短均线多头、近 20 日涨幅不大。14:30 前为预览。"),
+        StrategyMeta(id: "overnight", title: "尾盘隔夜", icon: "sunrise.fill", summary: "14:50 买入、次日冲高卖出，主板 / 创业科创各 10 只",
+                     description: "全市场（剔除 ST、北交所、停牌、涨停封死、跌停、成交额 < 5000 万）逐只估算「次日盘中最高价比现价高 3% / 5%」的概率。模型用 1490 只随机个股 2026 年以来约 16.5 万个交易日拟合并做样本外检验：入选前 10 只次日冲高 ≥5% 的实际比例约 33%（全市场约 12%），≥3% 约 49%（全市场约 25%）。换手、振幅、成交额、上影线加分，量比过大和尾盘追高（高于分时均价）减分。这类股票次日开盘平均低开约 1%，开盘直接卖期望为负：建议次日挂 +3% 止盈单，10:30 前未成交或跌破 −3% 就卖出。14:50 自动锁定，此前为预览。不并入「综合」。"),
     ]
     static let titles = Dictionary(uniqueKeysWithValues: strategies.map { ($0.id, $0.title) })
 
@@ -707,11 +709,96 @@ enum QuantEngine {
         return finalize(results, min: 50)
     }
 
+    // MARK: 尾盘隔夜
+
+    /// Logistic models (same coefficients as the Mac bridge) for P(next-day high ≥ +3% / +5%)
+    /// from 14:50 snapshot features, plus a small ridge model of the relative next-open gap.
+    private static let overnightMu: [Double] = [-0.02299, 0.45772, 2.54109, -0.85013, 1.39985, 1.02516, -0.03806, 8.40879, 0.37384]
+    private static let overnightSd: [Double] = [0.25786, 0.29975, 2.11196, 1.71071, 0.5524, 0.87328, 0.38893, 0.51185, 0.48382]
+    private static let overnightClip: [(Double, Double)] = [(-0.8019, 0.6801), (0, 1), (0, 10.0885), (-5.7016, 3.7886), (0.0685, 2.6749),
+                                                             (-1.273, 3.0227), (-0.8484, 1.2074), (7.7112, 9.8854), (0, 1)]
+    private static let overnightW3: [Double] = [-1.05845, -0.00627, -0.05349, -0.02967, 0.04499, 0.51576, 0.13095, -0.16436, 0.16597, 0.06625]
+    private static let overnightW5: [Double] = [-2.08604, 0.00571, 0.00745, 0.03622, 0.07755, 0.48858, 0.20956, -0.16658, 0.22457, 0.04491]
+    private static let overnightWGap: [Double] = [0.0033, 0.03033, -0.05259, -0.04161, -0.02969, 0.0223, -0.08234, -0.05187, -0.05035, 0.04183]
+    /// Out of sample the top decile's predicted probability ran ~17% high.
+    private static let overnightCalibration = 0.83
+
+    static func overnight(_ ctx: QuantContext, perBoard: Int = 15) -> [StockPick] {
+        let minute = Market.minuteOfDay(ctx.now)
+        let preview = Market.isSession(ctx.now) && minute < 890
+        let fraction = Market.volumeFraction(ctx.now)
+        var byBoard: [String: [(rank: Double, p3: Double, p5: Double, gap: Double, raw: [Double], amp: Double, turnover: Double?, amount: Double, q: Quote)]] = [:]
+        for q in ctx.quotes {
+            guard !q.suspended, !q.upperLimit, !q.lowerLimit, q.price >= 2, tradeable(q),
+                  let high = q.high, let low = q.low, high > 0, low > 0 else { continue }
+            if let up = q.limitUpPrice, q.price >= up - 0.011 { continue }
+            let prev = q.prevClose ?? q.price / (1 + q.changePercent / 100)
+            guard prev > 0 else { continue }
+            let ratio = Market.limitRatio(code: q.code, name: q.name) ?? 0.1
+            let fullAmount = q.amount / max(fraction, 0.03)
+            guard fullAmount >= 5e7 else { continue }
+            var vwap: Double?
+            for scale in [100.0, 1.0] where q.volume > 0 {
+                let candidate = q.amount / (q.volume * scale)
+                if candidate >= low * 0.97 && candidate <= high * 1.03 { vwap = candidate; break }
+            }
+            let turnover = q.turnover.map { $0 / max(fraction, 0.03) }
+            let amp = (high - low) / prev * 100
+            let raw: [Double] = [
+                q.changePercent / (ratio * 100),
+                high > low ? (q.price - low) / (high - low) : 1,
+                (high - q.price) / prev * 100,
+                vwap.map { (q.price / $0 - 1) * 100 } ?? 0,
+                log(max(amp, 0.3)),
+                turnover.map { log(max($0, 0.2)) } ?? overnightMu[5],
+                q.volumeRatio.map { log(min(max($0, 0.1), 20)) } ?? overnightMu[6],
+                log10(max(fullAmount, 1)),
+                ratio >= 0.2 ? 1 : 0,
+            ]
+            var z: [Double] = [1]
+            for i in raw.indices { z.append((min(max(raw[i], overnightClip[i].0), overnightClip[i].1) - overnightMu[i]) / overnightSd[i]) }
+            func dot(_ w: [Double]) -> Double { zip(w, z).reduce(0) { $0 + $1.0 * $1.1 } }
+            let p3 = 1 / (1 + exp(-dot(overnightW3))) * overnightCalibration
+            let p5 = 1 / (1 + exp(-dot(overnightW5))) * overnightCalibration
+            let gap = dot(overnightWGap)
+            let board = WatchData.pickBoard(code: q.code)
+            byBoard[board, default: []].append((p5 + 0.1 * gap, p3, p5, gap, raw, amp, turnover, fullAmount, q))
+        }
+        var results: [StockPick] = []
+        for (board, entries) in byBoard {
+            for (index, e) in entries.sorted(by: { $0.rank > $1.rank }).prefix(perBoard).enumerated() {
+                let q = e.q
+                let score = 100 * (0.5 * min(e.p3 / 0.6, 1) + 0.5 * min(e.p5 / 0.4, 1))
+                var signals = [String(format: "次日盘中冲高 ≥3%% 概率约 %.0f%%，≥5%% 约 %.0f%%（全市场平均约 25%% / 12%%）", e.p3 * 100, e.p5 * 100),
+                               "\(board)第 \(index + 1) 名：" + String(format: "振幅 %.1f%%", e.amp)
+                                + (e.turnover.map { String(format: "、换手 %.1f%%", $0) } ?? "") + "、成交 \(Fmt.yuan(e.amount))（全天折算）"]
+                if e.raw[2] >= 3 { signals.append(String(format: "上影 %.1f%%：盘中资金试过拉升，次日再冲概率更高", e.raw[2])) }
+                if e.raw[3] <= 0 { signals.append("现价在分时均价线下方，没有尾盘追高") }
+                var risks = ["高波动股次日开盘平均低开约 1%：不要开盘市价卖，挂止盈单等冲高"]
+                if e.raw[3] > 1.5 { risks.append(String(format: "高于分时均价 %.1f%%，尾盘追高，次日低开概率大", e.raw[3])) }
+                if e.raw[1] > 0.9 && q.changePercent > 3 { risks.append("收在日内最高附近，回测显示次日开盘更弱") }
+                if e.gap < -0.4 { risks.append("隔夜模型估计其低开幅度在候选中偏大") }
+                if ctx.weak { risks.append("今日市场弱势") }
+                let takeProfit = Market.roundPrice(q.price * 1.03)
+                var pick = item(q, "overnight", score, signals: signals, risks: risks, pivot: takeProfit, stop: Market.roundPrice(q.price * 0.97),
+                                highlights: [String(format: "冲高≥3%% %.0f%%", e.p3 * 100), String(format: "冲高≥5%% %.0f%%", e.p5 * 100),
+                                             String(format: "振幅 %.1f%%", e.amp)],
+                                tags: [board] + (preview ? ["预览"] : []))
+                pick.pHi3 = (e.p3 * 1000).rounded() / 10
+                pick.pHi5 = (e.p5 * 1000).rounded() / 10
+                pick.takeProfit = takeProfit
+                pick.board = board
+                results.append(pick)
+            }
+        }
+        return results.sorted { ($0.pHi5 ?? 0) > ($1.pHi5 ?? 0) }
+    }
+
     // MARK: 综合
 
     static func combine(_ lists: [String: [StockPick]]) -> [StockPick] {
         var merged: [String: (pick: StockPick, base: Int)] = [:]
-        for id in strategies.map(\.id) where id != "all" {
+        for id in strategies.map(\.id) where id != "all" && id != "overnight" {
             for pick in lists[id] ?? [] {
                 if var current = merged[pick.code] {
                     current.pick.strategies.append(id)

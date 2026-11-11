@@ -11,8 +11,9 @@ struct WatchSidebar: View {
     @State private var newCode = ""
 
     private var groups: [String] {
-        store.watch.groups.filter { !$0.hasPrefix(WatchData.pickGroupPrefix) }
+        store.watch.groups.filter { !WatchData.isAutoGroup($0) }
             + store.watch.groups.filter { $0.hasPrefix(WatchData.pickGroupPrefix) }.sorted(by: >)
+            + store.watch.groups.filter { $0.hasPrefix(WatchData.overnightGroupPrefix) }.sorted(by: >)
     }
     private var codes: [String] {
         group == "全部自选" ? store.watch.codes : store.watch.codes.filter { (store.watch.groupByCode[$0] ?? store.watch.groups.first) == group }
@@ -30,6 +31,20 @@ struct WatchSidebar: View {
                         Image(systemName: "clock.arrow.circlepath")
                         Text("推荐 \(summary.count) 只 · 上涨 \(summary.winners) 只")
                         if let avg = summary.average { Text("· 平均 \(Fmt.pct(avg))").foregroundStyle(changeColor(avg)) }
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+                if let s = store.overnightSummary(group: group) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        if s.tracked == 0 {
+                            Text("\(String(s.day.suffix(5))) 14:50 锁定 \(s.count) 只 · 次日挂 +3% 止盈")
+                        } else {
+                            Text("次日冲高 ≥3%：\(s.hit3)/\(s.tracked) · ≥5%：\(s.hit5)/\(s.tracked)")
+                            HStack(spacing: 8) {
+                                if let o = s.avgOpen { Text("开盘均 \(Fmt.pct(o))").foregroundStyle(changeColor(o)) }
+                                if let h = s.avgHigh { Text("最高均 \(Fmt.pct(h))").foregroundStyle(changeColor(h)) }
+                            }
+                        }
                     }
                     .font(.caption).foregroundStyle(.secondary)
                 }
@@ -72,6 +87,11 @@ struct WatchSidebar: View {
                         let since = q.map { pick.pick.price > 0 ? ($0.price / pick.pick.price - 1) * 100 : 0 }
                         Text("荐\(pick.pick.initialScore) \(Fmt.pct(since, 1))").font(.system(size: 10, weight: .medium))
                             .foregroundStyle(changeColor(since ?? 0))
+                    } else if let record = store.overnightPick(code) {
+                        let high = record.pick.nextHighReturn
+                        Text(high.map { "隔夜高 " + Fmt.pct($0, 1) } ?? String(format: "隔夜 ≥5%% %.0f%%", record.pick.pHi5 ?? 0))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(high.map { $0 >= 3 ? Color.red : Color.green } ?? Color.mint)
                     }
                 }
             }
@@ -358,9 +378,14 @@ struct PicksView: View {
     let open: (String) -> Void
     @AppStorage("pad.strategy") private var strategy = "all"
     @State private var showLogic = false
+    @AppStorage("pad.overnightBoard") private var overnightBoard = "全部"
 
     private var meta: StrategyMeta { QuantEngine.strategies.first { $0.id == strategy } ?? QuantEngine.strategies[0] }
-    private var picks: [StockPick] { (store.lists[strategy] ?? []).filter { !store.watch.blacklist.contains($0.code) } }
+    private var picks: [StockPick] {
+        let all = (store.lists[strategy] ?? []).filter { !store.watch.blacklist.contains($0.code) }
+        guard strategy == "overnight", overnightBoard != "全部" else { return all }
+        return all.filter { ($0.board ?? WatchData.pickBoard(code: $0.code)) == overnightBoard }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -400,6 +425,7 @@ struct PicksView: View {
                 }
             }
             .padding(.horizontal, 12).padding(.bottom, 6)
+            if strategy == "overnight" { overnightHeader }
             if picks.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: meta.icon).font(.largeTitle).foregroundStyle(.secondary)
@@ -417,6 +443,28 @@ struct PicksView: View {
                 .listStyle(.plain)
             }
         }
+    }
+
+    private var overnightHeader: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                Picker("板块", selection: $overnightBoard) {
+                    Text("全部").tag("全部"); Text("主板").tag("主板"); Text("创业科创").tag("创业科创")
+                }.pickerStyle(.segmented).frame(width: 260)
+                if let r = store.overnightTrackRecord() {
+                    Text("实盘跟踪 \(r.picks) 只：冲高 ≥3% \(r.hit3) 只（\(Int((Double(r.hit3) / Double(r.picks) * 100).rounded()))%）· ≥5% \(r.hit5) 只"
+                         + (r.avgOpen.map { " · 开盘均 " + Fmt.pct($0) } ?? "") + (r.avgHigh.map { " · 最高均 " + Fmt.pct($0) } ?? ""))
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text(Market.isSession() && Market.minuteOfDay() < 890 ? "14:50 自动锁定，此前为预览" : "14:50 锁定后，次日记录开盘 / 最高检验命中率")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Text("买点 14:50–14:57；卖点：次日挂「止盈」价单，10:30 前未成交或跌破「止损」就卖出。这类高波动股次日开盘平均低开约 1%，开盘直接卖不划算。")
+                .font(.caption2).foregroundStyle(.orange)
+        }
+        .padding(.horizontal, 12).padding(.bottom, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var emptyText: String {
@@ -458,7 +506,7 @@ struct PicksView: View {
                 }
             }.frame(width: 140, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
-                Text(p.pivot.map { String(format: "观察 %.2f", $0) } ?? "—").foregroundStyle(.primary)
+                Text(p.pivot.map { String(format: p.strategy == "overnight" ? "止盈 %.2f" : "观察 %.2f", $0) } ?? "—").foregroundStyle(.primary)
                 Text(p.stopLoss.map { String(format: "止损 %.2f", $0) + (p.riskPercent.map { String(format: "（-%.1f%%）", $0) } ?? "") } ?? "—")
                     .font(.caption2).foregroundStyle(.green)
             }.font(.caption).monospacedDigit().frame(width: 130, alignment: .leading)
@@ -510,6 +558,8 @@ struct SettingsView: View {
                 Section {
                     Toggle("每日自动推荐", isOn: $store.settings.autoPicks)
                     Stepper("每板块每日 \(store.settings.dailyPickLimit) 只", value: $store.settings.dailyPickLimit, in: 3...30)
+                    Toggle("尾盘隔夜推荐（14:50 锁定，建「隔夜 MM-dd」分组）", isOn: $store.settings.autoOvernight)
+                    Stepper("隔夜每板块 \(store.settings.overnightLimit) 只", value: $store.settings.overnightLimit, in: 3...15)
                 } header: { Text("每日推荐") } footer: {
                     Text("综合 A 级、未涨停可买入的股票按日期和板块（主板 / 创业科创）加入「推荐 MM-dd」分组；满额后评分高至少 3 分才替换最低分，每只至少保留 10 分钟。")
                 }
