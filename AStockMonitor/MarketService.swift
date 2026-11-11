@@ -160,5 +160,24 @@ actor MarketService {
         DebugLog.write("潜力股结果 scanning=\(report.scanning), progress=\(report.progress)/\(report.total), stocks=\(report.stocks.count), updatedAt=\(report.updatedAt ?? "nil")")
         return report
     }
+    func fetchInsight(code: String, provider: String) async throws -> StockInsight {
+        try await getJSON(path: "/stock-insight", query: ["code": code, "provider": provider], timeout: 60)
+    }
+    func fetchNews(code: String) async throws -> [StockNewsItem] {
+        try await getJSON(path: "/news", query: ["code": code], timeout: 30)
+    }
+    private func getJSON<T: Decodable>(path: String, query: [String: String], timeout: TimeInterval) async throws -> T {
+        guard var components = URLComponents(string: baseURL + path) else { throw URLError(.badURL) }
+        components.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+        guard let url = components.url else { throw URLError(.badURL) }
+        var request = URLRequest(url: url); request.timeoutInterval = timeout
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let message = (try? JSONDecoder().decode(ServiceError.self, from: data).error) ?? "HTTP \(http.statusCode)"
+            DebugLog.write("请求失败 \(path) status=\(http.statusCode), error=\(message)")
+            throw NSError(domain: "AStockMonitor.Service", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        return try JSONDecoder().decode(T.self, from: data)
+    }
     private struct ServiceError: Decodable { let error: String }
 }

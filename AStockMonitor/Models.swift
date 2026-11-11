@@ -316,6 +316,54 @@ struct DailyPick: Codable, Hashable {
     var price: Double
     var time: Date
     var strategies: [String] = []
+    /// Snapshot of why it was recommended (screener output at pick time).
+    var grade: String? = nil
+    var signals: [String]? = nil
+    var risks: [String]? = nil
+    var highlights: [String]? = nil
+    var tags: [String]? = nil
+    var pivot: Double? = nil
+    var stopLoss: Double? = nil
+    var riskPercent: Double? = nil
+    var industry: String? = nil
+    var changePercent: Double? = nil
+    /// True when the snapshot was filled in after the pick (older records).
+    var backfilled: Bool? = nil
+
+    mutating func applySnapshot(_ stock: PotentialStock) {
+        grade = stock.grade; signals = stock.signals; risks = stock.risks
+        highlights = stock.highlights; tags = stock.tags; pivot = stock.pivot
+        stopLoss = stock.stopLoss; riskPercent = stock.riskPercent
+        industry = stock.industry; changePercent = stock.changePercent
+        if strategies.isEmpty { strategies = stock.strategies ?? [] }
+    }
+}
+
+/// Live quantitative profile of one stock from the bridge's /stock-insight.
+struct StockInsight: Decodable {
+    struct Item: Decodable, Hashable { let label: String; let value: String; let tone: String; let hint: String? }
+    struct Group: Decodable, Hashable { let title: String; let items: [Item] }
+    struct Match: Decodable, Hashable {
+        let strategy: String; let title: String; let score: Int; let grade: String
+        let signals: [String]; let risks: [String]; let highlights: [String]
+        let pivot: Double?; let stopLoss: Double?; let riskPercent: Double?
+    }
+    let code: String
+    let name: String
+    let industry: String?
+    let concepts: [String]
+    let groups: [Group]
+    let strategies: [Match]
+    let updatedAt: String?
+}
+
+struct StockNewsItem: Decodable, Identifiable, Hashable {
+    let title: String
+    let content: String
+    let time: String
+    let source: String
+    let url: String
+    var id: String { url.isEmpty ? time + title : url }
 }
 
 struct WatchData: Codable {

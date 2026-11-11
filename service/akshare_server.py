@@ -28,7 +28,7 @@ socket.setdefaulttimeout(10)
 
 HOST, PORT, CACHE_SECONDS = "127.0.0.1", 8767, 2
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-API_VERSION = 17
+API_VERSION = 18
 INDEX_SYMBOLS = {
     "sh000001": "上证指数", "sz399001": "深证成指",
     "sz399006": "创业板指", "sh000680": "科创综指",
@@ -2453,6 +2453,163 @@ def potential_payload(provider="auto"):
     }
 
 
+# ---------------------------------------------------------------------------
+# 个股量化画像与资讯（详情窗口侧栏）
+# ---------------------------------------------------------------------------
+news_cache: dict[str, tuple[float, list]] = {}
+news_lock = threading.Lock()
+NEWS_TTL = 10 * 60
+
+def _fmt_pct(value, digits=2):
+    return f"{value:+.{digits}f}%" if value is not None else "—"
+
+def _fmt_yuan(value):
+    if value is None:
+        return "—"
+    magnitude = abs(value)
+    text = f"{magnitude / 1e8:.2f} 亿" if magnitude >= 1e8 else (f"{magnitude / 1e4:.0f} 万" if magnitude >= 1e4 else f"{magnitude:.0f} 元")
+    return ("-" if value < 0 else "") + text
+
+def _fmt_price(value):
+    return f"{value:.2f}" if value else "—"
+
+def _tone(value, neutral=0.0):
+    if value is None:
+        return "neutral"
+    return "up" if value > neutral else ("down" if value < neutral else "neutral")
+
+def stock_insight(code, provider="auto"):
+    rows = _market_rows(provider)
+    base = next((row for row in rows if row["code"] == code), None)
+    if base is None:
+        raise ValueError(f"行情中没有 {code}")
+    with classification_lock:
+        industry = industry_by_code.get(code, "")
+        concepts = _useful_concepts(sorted(concepts_by_code.get(code, ())))
+    q = dict(base, industry=industry)
+    now = datetime.now(SHANGHAI_TZ)
+    groups = []
+
+    def item(label, value, tone="neutral", hint=None):
+        entry = {"label": label, "value": value, "tone": tone}
+        if hint:
+            entry["hint"] = hint
+        return entry
+
+    price = q.get("price") or 0
+    high, low, prev_close = q.get("high"), q.get("low"), q.get("prevClose")
+    position = (price - low) / (high - low) * 100 if high and low and high > low else None
+    amplitude = (high - low) / prev_close * 100 if high and low and prev_close else None
+    groups.append({"title": "当日行情", "items": [
+        item("涨跌幅", _fmt_pct(q.get("changePercent")), _tone(q.get("changePercent"))),
+        item("今开 / 昨收", f"{_fmt_price(q.get('open'))} / {_fmt_price(prev_close)}"),
+        item("最高 / 最低", f"{_fmt_price(high)} / {_fmt_price(low)}"),
+        item("振幅", f"{amplitude:.2f}%" if amplitude is not None else "—"),
+        item("日内位置", f"{position:.0f}%" if position is not None else "—", "up" if (position or 0) >= 80 else "neutral", "现价在今日高低点区间中的位置"),
+        item("成交额", _fmt_yuan(q.get("amount"))),
+        item("量比", f"{q['volumeRatio']:.2f}" if q.get("volumeRatio") is not None else "—", _tone(q.get("volumeRatio"), 1.5)),
+        item("换手率", f"{q['turnover']:.2f}%" if q.get("turnover") is not None else "—"),
+        item("流通市值", _fmt_yuan(q.get("floatMarketCap"))),
+        item("涨停价", f"{q['limitUpPrice']:.2f}" if q.get("limitUpPrice") else "—"),
+    ]})
+
+    metrics = tick_metrics(code, q) if _session_minute(now) is not None else {}
+    events = surge_events_snapshot().get(code, [])
+    intraday = [
+        item("1 分钟涨速", _fmt_pct(metrics.get("speed1")), _tone(metrics.get("speed1"))),
+        item("3 分钟涨速", _fmt_pct(metrics.get("speed3")), _tone(metrics.get("speed3"))),
+        item("5 分钟涨速", _fmt_pct(metrics.get("speed5")), _tone(metrics.get("speed5"))),
+        item("5 分钟低点拉升", _fmt_pct(metrics.get("rise5")), _tone(metrics.get("rise5"))),
+        item("近 3 分钟额速", f"{metrics['accel']:.1f}×" if metrics.get("accel") is not None else "—", _tone(metrics.get("accel"), 2), "近 3 分钟每分钟成交额 / 全天平均"),
+        item("今日速拉", f"{len(events)} 次" if events else "无", "up" if events else "neutral"),
+    ]
+    for event in events[-4:]:
+        intraday.append(item(f"{event['time']} 速拉", f"{event['seconds']} 秒 +{event['rise']:.1f}%，额速 {event.get('accel', 0):.1f}×", "up"))
+    groups.append({"title": "盘中速度（本机逐快照）", "items": intraday})
+
+    zt = zt_snapshot()
+    limit_info = zt["pool"].get(code) or zt["broken"].get(code)
+    previous = zt["previous"].get(code)
+    if limit_info or previous:
+        limit_items = []
+        if limit_info:
+            status = "封板" if code in zt["pool"] else "炸板"
+            limit_items += [item("状态", status, "up" if status == "封板" else "neutral"),
+                            item("首次封板", limit_info.get("firstTime") or "—"),
+                            item("炸板次数", str(limit_info.get("openCount") or 0)),
+                            item("连板", f"{limit_info.get('streak')} 板" if limit_info.get("streak") else "—", "up"),
+                            item("封单", _fmt_yuan(limit_info.get("sealAmount")) if limit_info.get("sealAmount") else "—"),
+                            item("涨停统计", limit_info.get("stat") or "—", hint="近期涨停天数 / 统计天数")]
+        if previous:
+            limit_items.append(item("昨日涨停", f"{previous.get('prevStreak', 1)} 板，昨日 {previous.get('prevTime') or '—'} 封板", "up"))
+        groups.append({"title": "涨停数据（东方财富涨停池）", "items": limit_items})
+
+    history = cached_daily(code)
+    if history is None:
+        try:
+            history, _ = fetch_daily_rows(code, "year")
+        except Exception as exc:
+            print(f"Insight daily fetch failed for {code}: {exc}", flush=True)
+            history = None
+    features = daily_features(q, history, now) if history else None
+    if features:
+        f = features
+        trend = ("均线多头" if f["ma5"] > f["ma10"] > f["ma20"] > f["ma60"] else
+                 ("站上 20 日线" if price > f["ma20"] else "20 日线下方"))
+        golden = "零轴上方金叉" if f["goldenCross"] and f["dif"][-1] > 0 else ("金叉" if f["goldenCross"] else ("多头" if f["dif"][-1] > f["dea"][-1] else "空头"))
+        groups.append({"title": "日线结构（前复权）", "items": [
+            item("趋势", trend, "up" if trend != "20 日线下方" else "down"),
+            item("MA5 / MA10", f"{f['ma5']:.2f} / {f['ma10']:.2f}"),
+            item("MA20 / MA60", f"{f['ma20']:.2f} / {f['ma60']:.2f}"),
+            item("均线粘合度", f"{f['maSpread'] * 100:.1f}%", "up" if f["maSpread"] < 0.03 else "neutral", "5/10/20 日线最大间距，越小越蓄势"),
+            item("乖离 20 日线", _fmt_pct(f["bias20"] * 100), "down" if f["bias20"] > 0.15 else _tone(f["bias20"])),
+            item("近 5 / 20 / 60 日", f"{f['ret5'] * 100:+.1f}% / {f['ret20'] * 100:+.1f}% / {f['ret60'] * 100:+.1f}%", _tone(f["ret20"])),
+            item("距 60 日高点", _fmt_pct((price / f["high60"] - 1) * 100), "up" if price > f["high60"] else "neutral", f"60 日高点 {f['high60']:.2f}，20 日高点 {f['high20']:.2f}"),
+            item("成交额 / 5 日均额", f"{f['amountRatio']:.2f}×" if f["amountRatio"] else "—", _tone(f["amountRatio"], 1.5), "当日按 A 股 U 型成交分布折算全天"),
+            item("5 日 / 20 日均额", f"{f['avg5'] / f['avg20']:.2f}" if f["avg20"] else "—", hint="小于 1 表示近期缩量"),
+            item("近 20 日红肥绿瘦", f"{f['upAmount'] / f['downAmount']:.2f}" if f["downAmount"] else "—", _tone((f["upAmount"] / f["downAmount"]) if f["downAmount"] else None, 1.5), "上涨日成交额 / 下跌日成交额"),
+            item("振幅收敛", f"{f['std10'] / f['std60']:.2f}" if f["std60"] else "—", "up" if f["std60"] and f["std10"] / f["std60"] < 0.65 else "neutral", "近 10 日波动 / 近 60 日波动"),
+            item("MACD", golden, "up" if f["dif"][-1] > f["dea"][-1] else "down"),
+            item("近 15 日涨停", f"{f['limitUps15']} 次", "up" if f["limitUps15"] else "neutral"),
+        ]})
+
+    payload = potential_payload(provider)
+    matches = []
+    for meta in STRATEGY_META:
+        if meta["id"] == "all":
+            continue
+        entry = next((stock for stock in payload["lists"].get(meta["id"], []) if stock["code"] == code), None)
+        if entry:
+            matches.append({"strategy": meta["id"], "title": meta["title"], "score": entry["score"], "grade": entry["grade"],
+                            "signals": entry.get("signals", []), "risks": entry.get("risks", []),
+                            "highlights": entry.get("highlights", []), "pivot": entry.get("pivot"),
+                            "stopLoss": entry.get("stopLoss"), "riskPercent": entry.get("riskPercent")})
+    return {"code": code, "name": q.get("name", ""), "industry": industry or None, "concepts": concepts[:16],
+            "groups": groups, "strategies": matches,
+            "updatedAt": now.isoformat(timespec="seconds")}
+
+def stock_news(code):
+    with news_lock:
+        cached = news_cache.get(code)
+        if cached and time.time() - cached[0] < NEWS_TTL:
+            return cached[1]
+    import akshare as ak
+    frame = ak.stock_news_em(symbol=code)
+    items = []
+    if frame is not None and not frame.empty:
+        for _, row in frame.iterrows():
+            title = str(row.get("新闻标题", "") or "").strip()
+            if not title:
+                continue
+            content = " ".join(str(row.get("新闻内容", "") or "").split())
+            items.append({"title": title, "content": content[:220], "time": str(row.get("发布时间", "") or "")[:16],
+                          "source": str(row.get("文章来源", "") or ""), "url": str(row.get("新闻链接", "") or "")})
+    items.sort(key=lambda entry: entry["time"], reverse=True)
+    with news_lock:
+        news_cache[code] = (time.time(), items[:20])
+    print(f"Stock news ready for {code}: {len(items)} items", flush=True)
+    return items[:20]
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, data, status=200, headers=None):
         body = json.dumps(data, ensure_ascii=False).encode()
@@ -2624,6 +2781,12 @@ class Handler(BaseHTTPRequestHandler):
                 provider = params.get("provider", ["auto"])[0]
                 ensure_potential_scan(provider, force=params.get("force", ["0"])[0] == "1")
                 return self.send_json(potential_payload(provider))
+            if parsed.path in ("/stock-insight", "/news"):
+                code = params.get("code", [""])[0]
+                if len(code) != 6 or not code.isdigit(): return self.send_json({"error":"invalid code"}, 400)
+                if parsed.path == "/news":
+                    return self.send_json(stock_news(code))
+                return self.send_json(stock_insight(code, params.get("provider", ["auto"])[0]))
             if parsed.path == "/history":
                 code = params.get("code", [""])[0]
                 if len(code) != 6 or not code.isdigit(): return self.send_json({"error":"invalid code"}, 400)

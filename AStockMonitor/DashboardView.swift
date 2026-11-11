@@ -1633,6 +1633,7 @@ private struct QuoteRow: View {
 struct StockDetailView: View {
     @ObservedObject var store: MonitorStore
     let code: String
+    @AppStorage("detail.showInsight") private var showInsight = true
     @State private var points: [PricePoint] = []
     @State private var fiveDayPoints: [PricePoint] = []
     @State private var candles: [CandlePoint] = []
@@ -1804,12 +1805,40 @@ struct StockDetailView: View {
         return rising ? .red : .green
     }
     var body: some View {
+        HStack(spacing: 0) {
+            chartPane
+            if showInsight {
+                Divider()
+                StockInsightPanel(store: store, code: code).frame(width: 380)
+            }
+        }
+    }
+
+    private var chartPane: some View {
         GeometryReader { geometry in
         // Keep the chart proportional to the actual window height. The compact
         // floor prevents short windows from turning into a mostly-empty canvas.
         let chartHeight = min(560, max(190, geometry.size.height - 180))
         VStack(alignment: .leading, spacing: 10) {
-            HStack { VStack(alignment: .leading) { Text(quote?.name ?? code).font(.title2.bold()); Text(code).foregroundStyle(.secondary) }; Spacer(); if let q = quote { VStack(alignment: .trailing) { Text(String(format: "¥%.2f", q.price)).font(.title2); Text(String(format: "%+.2f%%", q.changePercent)).foregroundStyle(q.changePercent >= 0 ? .red : .green) } } }
+            HStack {
+                VStack(alignment: .leading) {
+                    HStack(spacing: 6) {
+                        Text(quote?.name ?? code).font(.title2.bold())
+                        if let record = store.pickHistory(for: code).first {
+                            Text("推荐 \(String(record.day.suffix(5)))").font(.caption.bold()).foregroundStyle(.white)
+                                .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(Color.orange))
+                        }
+                    }
+                    Text(code).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let q = quote { VStack(alignment: .trailing) { Text(String(format: "¥%.2f", q.price)).font(.title2); Text(String(format: "%+.2f%%", q.changePercent)).foregroundStyle(q.changePercent >= 0 ? .red : .green) } }
+                Button { withAnimation(.easeInOut(duration: 0.2)) { showInsight.toggle() } } label: {
+                    Image(systemName: "sidebar.right")
+                }
+                .buttonStyle(.plain).foregroundStyle(showInsight ? Color.accentColor : Color.secondary)
+                .help(showInsight ? "隐藏推荐说明 / 量化数据 / 资讯" : "显示推荐说明 / 量化数据 / 资讯")
+            }
             HStack {
                 Picker("周期", selection: $historyRange) {
                     Text("分时").tag("intraday"); Text("5日").tag("5d"); Text("一月").tag("1m")
@@ -2505,3 +2534,298 @@ private struct DirectionFilterPanel: View {
     }
 }
 
+
+
+/// Side panel of the stock detail window: why the stock was recommended (the
+/// snapshot saved at pick time), live quantitative data and the latest news.
+private struct StockInsightPanel: View {
+    @ObservedObject var store: MonitorStore
+    let code: String
+    @State private var insight: StockInsight?
+    @State private var insightError: String?
+    @State private var news: [StockNewsItem] = []
+    @State private var newsError: String?
+    @State private var newsLoading = true
+    @State private var section = "all"
+
+    private var quote: Quote? { store.quote(for: code) }
+    private var history: [(day: String, pick: DailyPick)] { store.pickHistory(for: code) }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("内容", selection: $section) {
+                Text("全部").tag("all"); Text("推荐").tag("pick"); Text("量化").tag("quant"); Text("资讯").tag("news")
+            }
+            .pickerStyle(.segmented).labelsHidden().padding(10)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if section == "all" || section == "pick" { recommendationSection }
+                    if section == "all" || section == "quant" { quantSection }
+                    if section == "all" || section == "news" { newsSection }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.35))
+        .task(id: code) { await loadNews() }
+        .task(id: code) {
+            while !Task.isCancelled {
+                await loadInsight()
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
+    }
+
+    // MARK: 推荐说明
+
+    @ViewBuilder private var recommendationSection: some View {
+        sectionHeader("推荐说明", icon: "star.circle.fill", color: .orange)
+        if history.isEmpty && (insight?.strategies.isEmpty ?? true) {
+            Text(insight == nil ? "正在读取选股结果…" : "该股不在推荐池，当前也未入选任何选股策略。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        ForEach(Array(history.enumerated()), id: \.offset) { index, record in
+            pickCard(day: record.day, pick: record.pick, latest: index == 0)
+        }
+        if let matches = insight?.strategies, !matches.isEmpty {
+            Text(history.isEmpty ? "当前入选策略" : "最新量化评估").font(.caption.bold()).foregroundStyle(.secondary).padding(.top, 2)
+            ForEach(matches, id: \.strategy) { match in matchCard(match) }
+        }
+    }
+
+    private func pickCard(day: String, pick: DailyPick, latest: Bool) -> some View {
+        let current = quote?.price
+        let since = current.flatMap { pick.price > 0 ? ($0 / pick.price - 1) * 100 : nil }
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                if let grade = pick.grade { gradeBadge(grade) }
+                Text("\(day) \(pick.time.formatted(date: .omitted, time: .shortened)) 推荐")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(WatchData.pickBoard(code: pick.code)).font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                if pick.backfilled == true {
+                    Text("补录").font(.caption2).foregroundStyle(.secondary).help("此推荐早于说明保存功能，说明为首次打开后补录的最新选股结果")
+                }
+            }
+            HStack(spacing: 12) {
+                metric("推荐价", String(format: "%.2f", pick.price))
+                metric("现价", current.map { String(format: "%.2f", $0) } ?? "—")
+                metric("推荐以来", since.map { String(format: "%+.2f%%", $0) } ?? "—", tone: since)
+                metric("评分", "\(pick.initialScore) → \(pick.score)")
+            }
+            if !pick.strategies.isEmpty || !(pick.tags ?? []).isEmpty {
+                chips(Array(Set(pick.strategies.map(strategyTitle) + (pick.tags ?? []))).sorted())
+            }
+            if let highlights = pick.highlights, !highlights.isEmpty {
+                Text(highlights.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+            }
+            bulletList(pick.signals ?? [], color: .primary, icon: "checkmark.circle")
+            bulletList(pick.risks ?? [], color: .orange, icon: "exclamationmark.triangle")
+            if pick.pivot != nil || pick.stopLoss != nil {
+                HStack(spacing: 12) {
+                    if let pivot = pick.pivot { metric("观察位", String(format: "%.2f", pivot)) }
+                    if let stop = pick.stopLoss {
+                        metric("止损参考", String(format: "%.2f", stop) + (pick.riskPercent.map { String(format: "（-%.1f%%）", $0) } ?? ""), tone: -1)
+                    }
+                }
+            }
+            if pick.signals == nil {
+                Text("此条推荐没有保存说明；入选后再次出现在选股结果中时会自动补录。").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(latest ? 0.08 : 0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.orange.opacity(latest ? 0.35 : 0.15)))
+    }
+
+    private func matchCard(_ match: StockInsight.Match) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                gradeBadge(match.grade)
+                Text(match.title).font(.system(size: 12, weight: .semibold))
+                Text("\(match.score) 分").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if let pivot = match.pivot { Text(String(format: "观察 %.2f", pivot)).font(.caption2).monospacedDigit() }
+                if let stop = match.stopLoss { Text(String(format: "止损 %.2f", stop)).font(.caption2).foregroundStyle(.green).monospacedDigit() }
+            }
+            if !match.highlights.isEmpty {
+                Text(match.highlights.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+            }
+            bulletList(match.signals, color: .primary, icon: "checkmark.circle")
+            bulletList(match.risks, color: .orange, icon: "exclamationmark.triangle")
+        }
+        .padding(9)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+    }
+
+    // MARK: 量化数据
+
+    @ViewBuilder private var quantSection: some View {
+        HStack {
+            sectionHeader("量化数据", icon: "function", color: .blue)
+            Spacer()
+            if let updated = insight?.updatedAt, let date = ISO8601DateFormatter().date(from: updated) {
+                Text("更新 \(date.formatted(date: .omitted, time: .standard))").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        if let insight {
+            if insight.industry != nil || !insight.concepts.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let industry = insight.industry { Text("行业：\(industry)").font(.caption) }
+                    if !insight.concepts.isEmpty { chips(insight.concepts) }
+                }
+            }
+            ForEach(insight.groups, id: \.title) { group in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(group.title).font(.caption.bold()).foregroundStyle(.secondary)
+                    ForEach(group.items, id: \.self) { item in
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(item.label).font(.caption).foregroundStyle(.secondary)
+                            Spacer(minLength: 8)
+                            Text(item.value).font(.system(size: 12, weight: .medium)).monospacedDigit()
+                                .foregroundStyle(toneColor(item.tone)).multilineTextAlignment(.trailing)
+                        }
+                        .help(item.hint ?? "")
+                    }
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.035)))
+            }
+        } else if let insightError {
+            Text("量化数据暂不可用：\(insightError)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+        } else {
+            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("正在计算量化数据（首次需拉取日线）…").font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+
+    // MARK: 最新资讯
+
+    @ViewBuilder private var newsSection: some View {
+        HStack {
+            sectionHeader("最新资讯", icon: "newspaper.fill", color: .purple)
+            Spacer()
+            Button { Task { await loadNews() } } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(.plain).foregroundStyle(.secondary).help("刷新资讯")
+        }
+        if newsLoading && news.isEmpty {
+            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("正在获取东方财富个股资讯…").font(.caption).foregroundStyle(.secondary) }
+        } else if news.isEmpty {
+            Text(newsError.map { "资讯暂不可用：\($0)" } ?? "暂无相关资讯").font(.caption).foregroundStyle(.secondary)
+        }
+        ForEach(news) { item in
+            Button {
+                if let url = URL(string: item.url), !item.url.isEmpty { NSWorkspace.shared.open(url) }
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.title).font(.system(size: 12, weight: .medium)).foregroundStyle(.primary)
+                        .multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+                    if !item.content.isEmpty {
+                        Text(item.content).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                            .multilineTextAlignment(.leading)
+                    }
+                    Text("\(item.time) · \(item.source)").font(.caption2).foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.035)))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(item.url.isEmpty ? item.title : "在浏览器中打开原文")
+        }
+    }
+
+    // MARK: Helpers
+
+    private func sectionHeader(_ title: String, icon: String, color: Color) -> some View {
+        Label(title, systemImage: icon).font(.headline).foregroundStyle(color)
+    }
+    private func gradeBadge(_ grade: String) -> some View {
+        Text(grade).font(.caption.bold()).foregroundStyle(.white).frame(width: 18, height: 18)
+            .background(RoundedRectangle(cornerRadius: 4).fill(grade == "A" ? Color.red : (grade == "B" ? Color.orange : Color.gray)))
+    }
+    private func metric(_ title: String, _ value: String, tone: Double? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 12, weight: .semibold)).monospacedDigit()
+                .foregroundStyle(tone.map { $0 > 0 ? Color.red : ($0 < 0 ? Color.green : Color.primary) } ?? Color.primary)
+        }
+    }
+    private func chips(_ values: [String]) -> some View {
+        FlowLayout(spacing: 4) {
+            ForEach(values, id: \.self) { value in
+                Text(value).font(.system(size: 10))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+            }
+        }
+    }
+    @ViewBuilder private func bulletList(_ items: [String], color: Color, icon: String) -> some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, text in
+                    Label { Text(text).fixedSize(horizontal: false, vertical: true) } icon: { Image(systemName: icon) }
+                        .font(.caption).foregroundStyle(color)
+                }
+            }
+        }
+    }
+    private func toneColor(_ tone: String) -> Color {
+        switch tone { case "up": .red; case "down": .green; default: .primary }
+    }
+    private func strategyTitle(_ id: String) -> String {
+        store.potentialReport?.strategies?.first { $0.id == id }?.title ?? id
+    }
+
+    @MainActor private func loadInsight() async {
+        guard await store.ensureHistoryServiceAvailable() else { insightError = "本地行情服务未启动"; return }
+        do {
+            insight = try await MarketService.shared.fetchInsight(code: code, provider: store.provider)
+            insightError = nil
+        } catch {
+            if insight == nil { insightError = error.localizedDescription }
+            DebugLog.write("个股量化画像加载失败 code=\(code)：\(error.localizedDescription)")
+        }
+    }
+    @MainActor private func loadNews() async {
+        newsLoading = true
+        defer { newsLoading = false }
+        guard await store.ensureHistoryServiceAvailable() else { newsError = "本地行情服务未启动"; return }
+        do {
+            news = try await MarketService.shared.fetchNews(code: code)
+            newsError = nil
+        } catch {
+            newsError = error.localizedDescription
+            DebugLog.write("个股资讯加载失败 code=\(code)：\(error.localizedDescription)")
+        }
+    }
+}
+
+/// Wrapping row of small views (tags / concept chips).
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 4
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0, maxX: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > 0 && x + size.width > width { x = 0; y += rowHeight + spacing; rowHeight = 0 }
+            x += size.width + spacing
+            maxX = max(maxX, x - spacing)
+            rowHeight = max(rowHeight, size.height)
+        }
+        return CGSize(width: min(maxX, width), height: y + rowHeight)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, rowHeight: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > bounds.minX && x + size.width > bounds.maxX { x = bounds.minX; y += rowHeight + spacing; rowHeight = 0 }
+            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+    }
+}

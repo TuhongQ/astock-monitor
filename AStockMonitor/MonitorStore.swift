@@ -590,6 +590,7 @@ import AppKit
 
         let ranked = report.lists?["all"] ?? report.stocks
         let latestScore = Dictionary(ranked.map { ($0.code, $0.score) }, uniquingKeysWith: { first, _ in first })
+        let latestStock = Dictionary(ranked.map { ($0.code, $0) }, uniquingKeysWith: { first, _ in first })
         // Keep picks still in their board group; refresh scores. A stock that
         // fell out of the combined list has lost potential.
         var picks = (updated.picksByDay[day] ?? []).filter {
@@ -597,6 +598,11 @@ import AppKit
         }
         for index in picks.indices {
             picks[index].score = latestScore[picks[index].code] ?? max(picks[index].score - 10, 0)
+            // Picks saved before snapshots existed: fill in the reason from the latest screen.
+            if picks[index].signals == nil, let stock = latestStock[picks[index].code] {
+                picks[index].applySnapshot(stock)
+                picks[index].backfilled = true
+            }
         }
         var replaced = Set(updated.replacedByDay[day] ?? [])
         let blacklisted = Set(updated.blacklist)
@@ -610,8 +616,9 @@ import AppKit
             if let limitUp = live.limitUpPrice, live.price >= limitUpPrice(limitUp) { continue }
             let board = WatchData.pickBoard(code: stock.code)
             let group = WatchData.pickGroupName(day: day, board: board)
-            let pick = DailyPick(code: stock.code, name: stock.name, initialScore: stock.score, score: stock.score,
+            var pick = DailyPick(code: stock.code, name: stock.name, initialScore: stock.score, score: stock.score,
                                  price: live.price, time: now, strategies: stock.strategies ?? [])
+            pick.applySnapshot(stock)
             let boardIndices = picks.indices.filter { WatchData.pickBoard(code: picks[$0].code) == board }
             if boardIndices.count < limit {
                 picks.append(pick); added.append(pick)
@@ -752,6 +759,12 @@ import AppKit
             if let pick = picks.first(where: { $0.code == code }) { return (day, pick) }
         }
         return nil
+    }
+
+    /// Every day a code was recommended (newest first), regardless of its current group.
+    func pickHistory(for code: String) -> [(day: String, pick: DailyPick)] {
+        watch.picksByDay.compactMap { day, picks in picks.first { $0.code == code }.map { (day, $0) } }
+            .sorted { $0.day > $1.day }
     }
 
     /// Picks of one dated group with the return since recommendation, for review.

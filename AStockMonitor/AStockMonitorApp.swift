@@ -46,11 +46,11 @@ struct AStockMonitorApp: App {
                 if code.hasPrefix("index:") {
                     IndexDetailView(store: store, symbol: String(code.dropFirst("index:".count))).frame(minWidth: 700, minHeight: 460)
                 } else {
-                    StockDetailView(store: store, code: code).frame(minWidth: 700, minHeight: 460)
+                    StockDetailView(store: store, code: code).frame(minWidth: 900, minHeight: 520)
                 }
             }
         }
-        .defaultSize(width: 980, height: 540)
+        .defaultSize(width: 1300, height: 680)
 
     }
 }
