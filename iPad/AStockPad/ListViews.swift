@@ -29,7 +29,7 @@ struct WatchSidebar: View {
                 if let summary = store.picksSummary(group: group) {
                     HStack(spacing: 4) {
                         Image(systemName: "clock.arrow.circlepath")
-                        Text("推荐 \(summary.count) 只 · 上涨 \(summary.winners) 只")
+                        Text("推荐 \(summary.count) 只" + (summary.sealed > 0 ? " · 涨停 \(summary.sealed)" : "") + " · 上涨 \(summary.winners) 只")
                         if let avg = summary.average { Text("· 平均 \(Fmt.pct(avg))").foregroundStyle(changeColor(avg)) }
                     }
                     .font(.caption).foregroundStyle(.secondary)
@@ -561,7 +561,7 @@ struct SettingsView: View {
                     Toggle("尾盘隔夜推荐（14:50 锁定，建「隔夜 MM-dd」分组）", isOn: $store.settings.autoOvernight)
                     Stepper("隔夜每板块 \(store.settings.overnightLimit) 只", value: $store.settings.overnightLimit, in: 3...15)
                 } header: { Text("每日推荐") } footer: {
-                    Text("综合 A 级、未涨停可买入的股票按日期和板块（主板 / 创业科创）加入「推荐 MM-dd」分组；满额后评分高至少 3 分才替换最低分，每只至少保留 10 分钟。")
+                    Text("综合 A 级、未涨停可买入的股票按日期和板块（主板 / 创业科创）加入「推荐 MM-dd」分组；每板块保持设定数量的可买入股票，已涨停的不占名额、自动补入新股；满额后评分高至少 3 分才替换最低分，每只至少保留 10 分钟。")
                 }
                 Section {
                     Picker("刷新间隔", selection: $store.settings.refreshSeconds) {

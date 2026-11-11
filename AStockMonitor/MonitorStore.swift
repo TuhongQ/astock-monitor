@@ -628,7 +628,10 @@ import AppKit
                                  price: live.price, time: now, strategies: stock.strategies ?? [])
             pick.applySnapshot(stock)
             let boardIndices = picks.indices.filter { WatchData.pickBoard(code: picks[$0].code) == board }
-            if boardIndices.count < limit {
+            // Picks sealed at the limit can no longer be bought: they stay in the group
+            // but do not use up the quota, so each board keeps `limit` buyable picks.
+            let buyableCount = boardIndices.filter { quote(for: picks[$0].code)?.upperLimit != true }.count
+            if buyableCount < limit {
                 picks.append(pick); added.append(pick)
             } else {
                 // Never swap out a pick that has since sealed the limit (it worked),
@@ -658,18 +661,20 @@ import AppKit
             let boardAdded = added.filter { WatchData.pickBoard(code: $0.code) == board }
             guard !boardAdded.isEmpty else { continue }
             let group = WatchData.pickGroupName(day: day, board: board)
-            let count = picks.filter { WatchData.pickBoard(code: $0.code) == board }.count
+            let boardPicks = picks.filter { WatchData.pickBoard(code: $0.code) == board }
+            let sealed = boardPicks.filter { quote(for: $0.code)?.upperLimit == true }.count
+            let count = boardPicks.count - sealed
             DebugLog.write("当日推荐新增（\(board)）：\(boardAdded.map { "\($0.code)\($0.name)(\($0.score))" }.joined(separator: ","))")
             let names = boardAdded.map(\.name)
             enqueueToast(AlertToast(shortType: "当日推荐", name: names.prefix(3).joined(separator: "、") + (names.count > 3 ? " 等" : ""),
                                     code: boardAdded[0].code,
-                                    effect: "综合 A 级、未涨停可买入，加入「\(group)」（\(board) \(count)/\(limit) 只）"))
+                                    effect: "综合 A 级、未涨停可买入，加入「\(group)」（\(board) 可买 \(count)/\(limit) 只" + (sealed > 0 ? "，另有 \(sealed) 只已涨停" : "") + "）"))
         }
         for swap in swaps {
             let group = WatchData.pickGroupName(day: day, code: swap.into.code)
             DebugLog.write("当日推荐替换：\(swap.out.code)\(swap.out.name)(\(swap.out.score)) → \(swap.into.code)\(swap.into.name)(\(swap.into.score))")
             enqueueToast(AlertToast(shortType: "推荐替换", name: swap.into.name, code: swap.into.code,
-                                    effect: "评分 \(swap.into.score) 替换 \(swap.out.name)（\(swap.out.score)），「\(group)」保持 \(limit) 只"))
+                                    effect: "评分 \(swap.into.score) 替换 \(swap.out.name)（\(swap.out.score)），「\(group)」保持 \(limit) 只可买"))
         }
     }
 
@@ -913,7 +918,7 @@ import AppKit
     }
 
     /// Picks of one dated group with the return since recommendation, for review.
-    func picksSummary(forGroup group: String) -> (count: Int, average: Double?, winners: Int)? {
+    func picksSummary(forGroup group: String) -> (count: Int, average: Double?, winners: Int, sealed: Int)? {
         guard let (day, board) = watch.picksByDay.keys.lazy.flatMap({ day in WatchData.pickBoards.map { (day, $0) } })
                 .first(where: { WatchData.pickGroupName(day: $0.0, board: $0.1) == group }) else { return nil }
         let picks = (watch.picksByDay[day] ?? []).filter { WatchData.pickBoard(code: $0.code) == board && watch.groupByCode[$0.code] == group }
@@ -923,7 +928,8 @@ import AppKit
             return (live.price / pick.price - 1) * 100
         }
         let average = returns.isEmpty ? nil : returns.reduce(0, +) / Double(returns.count)
-        return (picks.count, average, returns.filter { $0 > 0 }.count)
+        let sealed = picks.filter { quote(for: $0.code)?.upperLimit == true }.count
+        return (picks.count, average, returns.filter { $0 > 0 }.count, sealed)
     }
 
     /// Same-industry rapid alerts in the last 10 minutes (sector co-movement).

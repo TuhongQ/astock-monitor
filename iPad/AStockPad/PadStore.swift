@@ -367,7 +367,9 @@ final class PadStore: ObservableObject {
             let group = WatchData.pickGroupName(day: day, board: board)
             let pick = DailyPick(pick: stock, price: live.price, time: now)
             let boardIndices = picks.indices.filter { WatchData.pickBoard(code: picks[$0].code) == board }
-            if boardIndices.count < limit {
+            // Sealed limit-up picks stay in the group but no longer use up the quota.
+            let buyableCount = boardIndices.filter { byCode[picks[$0].code]?.upperLimit != true }.count
+            if buyableCount < limit {
                 picks.append(pick); added.append(pick)
             } else {
                 let replaceable = boardIndices.filter { byCode[picks[$0].code]?.upperLimit != true && now.timeIntervalSince(picks[$0].time) >= 600 }
@@ -517,7 +519,7 @@ final class PadStore: ObservableObject {
                 highs.isEmpty ? nil : highs.reduce(0, +) / Double(highs.count))
     }
 
-    func picksSummary(group: String) -> (count: Int, average: Double?, winners: Int)? {
+    func picksSummary(group: String) -> (count: Int, average: Double?, winners: Int, sealed: Int)? {
         for (day, picks) in watch.picksByDay {
             for board in WatchData.pickBoards where WatchData.pickGroupName(day: day, board: board) == group {
                 let members = picks.filter { WatchData.pickBoard(code: $0.code) == board && watch.groupByCode[$0.code] == group }
@@ -526,7 +528,8 @@ final class PadStore: ObservableObject {
                     guard p.price > 0, let q = byCode[p.code], q.price > 0 else { return nil }
                     return (q.price / p.price - 1) * 100
                 }
-                return (members.count, returns.isEmpty ? nil : returns.reduce(0, +) / Double(returns.count), returns.filter { $0 > 0 }.count)
+                let sealed = members.filter { byCode[$0.code]?.upperLimit == true }.count
+                return (members.count, returns.isEmpty ? nil : returns.reduce(0, +) / Double(returns.count), returns.filter { $0 > 0 }.count, sealed)
             }
         }
         return nil

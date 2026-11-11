@@ -754,7 +754,7 @@ struct DashboardView: View {
             if let summary = store.picksSummary(forGroup: selectedWatchGroup) {
                 HStack(spacing: 4) {
                     Image(systemName: "clock.arrow.circlepath").font(.caption2)
-                    Text("推荐 \(summary.count) 只 · 上涨 \(summary.winners) 只")
+                    Text("推荐 \(summary.count) 只" + (summary.sealed > 0 ? " · 涨停 \(summary.sealed)" : "") + " · 上涨 \(summary.winners) 只")
                     if let average = summary.average {
                         Text(String(format: "· 平均 %+.2f%%", average)).foregroundStyle(average >= 0 ? Color.red : Color.green)
                     }
@@ -2363,7 +2363,7 @@ struct SettingsView: View {
                         settingToggle("每日自动推荐", detail: "综合 A 级、未涨停可买入，按日期和板块建分组「推荐 MM-dd 主板 / 创业科创」", isOn: $draft.autoAddDailyPicks)
                         if draft.autoAddDailyPicks {
                             HStack {
-                                settingLabel("每板块每日推荐", detail: "主板、创业科创各自计数；满额后更高分（至少 +3）替换最低分")
+                                settingLabel("每板块每日推荐", detail: "主板、创业科创各自保持这么多只可买入的股票；已涨停的不占名额，自动补入新股；满额后更高分（至少 +3）替换最低分")
                                 Spacer()
                                 Stepper("\(draft.dailyPickLimit) 只", value: $draft.dailyPickLimit, in: 3...30)
                             }
