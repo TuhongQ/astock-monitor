@@ -3003,6 +3003,10 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed.path == "/news":
                     return self.send_json(stock_news(code))
                 return self.send_json(stock_insight(code, params.get("provider", ["auto"])[0]))
+            if parsed.path == "/pick-log":
+                label = "".join(ch for ch in params.get("label", ["manual"])[0] if ch.isalnum() or ch in "-_")[:32] or "manual"
+                return self.send_json(write_pick_log(label, params.get("provider", ["auto"])[0],
+                                                     include_market=params.get("market", ["1"])[0] == "1"))
             if parsed.path == "/ohlc":
                 codes = [c for c in params.get("codes", [""])[0].split(",") if len(c) == 6 and c.isdigit()][:200]
                 snapshot = eastmoney_ohlc_snapshot(max_age=20)
@@ -3122,6 +3126,79 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error":str(exc)}, 502)
     def log_message(self, fmt, *args): print(f"{self.address_string()} {fmt % args}", flush=True)
 
+# ---------------------------------------------------------------------------
+# 推荐复盘日志：每个交易日 11:30 / 14:50 / 收盘后保存所有策略结果
+# ---------------------------------------------------------------------------
+PICK_LOG_DIRECTORY = CACHE_DIRECTORY / "pick-logs"
+PICK_LOG_SLOTS = [("midday", 690, 780), ("1450", 890, 900), ("close", 901, 24 * 60)]
+pick_log_lock = threading.Lock()
+PICK_FIELDS = ("code", "name", "price", "changePercent", "industry", "score", "grade", "strategy", "strategies",
+               "signals", "risks", "highlights", "tags", "pivot", "stopLoss", "riskPercent", "volumeRatio", "turnover",
+               "amount", "floatMarketCap", "amountRatio", "ret20", "bias20", "pHi3", "pHi5", "takeProfit", "board",
+               "gapRisk", "boardRank", "limitStreak", "firstLimitTime", "surgeTime", "buyable", "sector")
+
+def write_pick_log(label, provider="auto", include_market=False):
+    """Append one snapshot of every strategy list to pick-logs/YYYY-MM-DD.json."""
+    now = datetime.now(SHANGHAI_TZ)
+    day = now.strftime("%Y-%m-%d")
+    payload = potential_payload(provider)
+    snapshot = {
+        "label": label, "time": now.isoformat(timespec="seconds"),
+        "market": payload.get("market"), "emotion": payload.get("emotion"),
+        "dailyScanUpdatedAt": payload.get("updatedAt"),
+        "strategies": [{"id": s["id"], "title": s["title"], "count": s.get("count"), "note": s.get("note")}
+                       for s in payload.get("strategies", [])],
+        "lists": {sid: [{k: item.get(k) for k in PICK_FIELDS if item.get(k) is not None} for item in items]
+                  for sid, items in payload.get("lists", {}).items()},
+    }
+    if include_market:
+        try:
+            ohlc = eastmoney_ohlc_snapshot(max_age=30)
+        except Exception as exc:
+            print(f"Pick log OHLC snapshot failed: {exc}", flush=True)
+            ohlc = {}
+        rows = []
+        for q in _market_rows(provider):
+            extra = ohlc.get(q["code"], {})
+            rows.append({"code": q["code"], "name": q.get("name"), "price": q.get("price"),
+                         "changePercent": q.get("changePercent"), "prevClose": extra.get("prevClose") or q.get("prevClose"),
+                         "open": extra.get("open") or q.get("open"), "high": extra.get("high") or q.get("high"),
+                         "low": extra.get("low") or q.get("low"), "amount": extra.get("amount") or q.get("amount"),
+                         "volume": extra.get("volume") or q.get("volume"), "turnover": q.get("turnover"),
+                         "volumeRatio": q.get("volumeRatio"), "floatMarketCap": q.get("floatMarketCap"),
+                         "upperLimit": q.get("upperLimit"), "lowerLimit": q.get("lowerLimit")})
+        snapshot["marketRows"] = rows
+    PICK_LOG_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    path = PICK_LOG_DIRECTORY / f"{day}.json"
+    with pick_log_lock:
+        existing = _read_json_cache(path) or {}
+        if not isinstance(existing, dict) or existing.get("day") != day:
+            existing = {"day": day, "snapshots": {}}
+        existing["snapshots"][label] = snapshot
+        _write_json_cache(path, existing)
+    counts = {sid: len(items) for sid, items in snapshot["lists"].items()}
+    print(f"Pick log saved {path.name} label={label}: {counts}", flush=True)
+    return {"path": str(path), "label": label, "counts": counts}
+
+def _pick_log_has(day, label):
+    payload = _read_json_cache(PICK_LOG_DIRECTORY / f"{day}.json")
+    return isinstance(payload, dict) and payload.get("day") == day and label in (payload.get("snapshots") or {})
+
+def pick_log_scheduler():
+    while True:
+        try:
+            now = datetime.now(SHANGHAI_TZ)
+            minute = now.hour * 60 + now.minute
+            day = now.strftime("%Y-%m-%d")
+            if now.weekday() < 5:
+                for label, start, end in PICK_LOG_SLOTS:
+                    if start <= minute < end and not _pick_log_has(day, label):
+                        write_pick_log(label, include_market=label in ("1450", "close"))
+        except Exception as exc:
+            print(f"Pick log scheduler failed: {exc}", flush=True)
+        time.sleep(30)
+
 if __name__ == "__main__":
+    threading.Thread(target=pick_log_scheduler, name="pick-log", daemon=True).start()
     print(f"AkShare bridge listening on http://{HOST}:{PORT}; quote cache={CACHE_SECONDS}s; derived-data disk caches=24h", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
