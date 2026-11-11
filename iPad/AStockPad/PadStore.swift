@@ -53,6 +53,12 @@ final class PadStore: ObservableObject {
         }
         let cutoff = Market.calendar.date(byAdding: .day, value: -7, to: Date()) ?? Date()
         if alerts.contains(where: { $0.time < cutoff }) { alerts.removeAll { $0.time < cutoff } }
+        // Exchange Level-1 snapshots update about every 3 s and a full-market fetch takes
+        // ~0.3 s, so move the old 15-second default to 3 seconds once.
+        if !UserDefaults.standard.bool(forKey: "refresh.fast.v1") {
+            UserDefaults.standard.set(true, forKey: "refresh.fast.v1")
+            if settings.refreshSeconds == 15 { settings.refreshSeconds = 3 }
+        }
     }
 
     // MARK: Lifecycle
@@ -66,8 +72,8 @@ final class PadStore: ObservableObject {
                 let started = Date()
                 await self.refreshOnce()
                 let elapsed = Date().timeIntervalSince(started)
-                let interval = Double(max(self.settings.refreshSeconds, 10))
-                try? await Task.sleep(nanoseconds: UInt64(max(interval - elapsed, 2) * 1_000_000_000))
+                let interval = Double(max(self.settings.refreshSeconds, 3))
+                try? await Task.sleep(nanoseconds: UInt64(max(interval - elapsed, 1) * 1_000_000_000))
             }
         }
     }

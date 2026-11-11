@@ -565,10 +565,10 @@ struct SettingsView: View {
                 }
                 Section {
                     Picker("刷新间隔", selection: $store.settings.refreshSeconds) {
-                        Text("10 秒").tag(10); Text("15 秒（推荐）").tag(15); Text("30 秒").tag(30); Text("60 秒").tag(60)
+                        Text("3 秒（推荐）").tag(3); Text("5 秒").tag(5); Text("10 秒").tag(10); Text("15 秒").tag(15); Text("30 秒").tag(30); Text("60 秒").tag(60)
                     }
                 } header: { Text("行情") } footer: {
-                    Text("iPad 版直接请求东方财富公开接口，全市场约 60 页并发获取。iPadOS 不允许后台持续联网，应用需保持在前台才会刷新和告警；运行时会保持屏幕常亮。数据仅供参考，不构成投资建议。")
+                    Text("iPad 版直接请求东方财富公开接口，全市场约 60 页并发获取（约 0.3 秒）；交易所一档快照约 3 秒更新一次，更短的间隔没有意义。iPadOS 不允许后台持续联网，应用需保持在前台才会刷新和告警；运行时会保持屏幕常亮。数据仅供参考，不构成投资建议。")
                 }
             }
             .navigationTitle("设置")

@@ -239,7 +239,7 @@ struct PadSettings: Codable, Equatable {
     var threshold = 5.0
     var rapidThreshold = 3.0
     var windowSeconds = 60
-    var refreshSeconds = 15
+    var refreshSeconds = 3
     var cooldownSeconds = 180
     var rapidCooldownSeconds = 180
     var limitMonitorAll = true
