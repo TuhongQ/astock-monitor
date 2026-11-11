@@ -1,0 +1,17 @@
+# Build products, backups and logs
+work/
+outputs/
+*.app/
+build/
+DerivedData/
+*.log
+*.zip
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+
+# Python / macOS
+__pycache__/
+*.pyc
+.DS_Store

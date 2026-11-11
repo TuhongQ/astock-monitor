@@ -1,0 +1,63 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+/* Begin PBXBuildFile section */
+		A00000000000000000000001 /* AStockMonitorApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000001 /* AStockMonitorApp.swift */; };
+		A00000000000000000000002 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000002 /* Models.swift */; };
+		A00000000000000000000003 /* MarketService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000003 /* MarketService.swift */; };
+		A00000000000000000000004 /* MonitorStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000004 /* MonitorStore.swift */; };
+		A00000000000000000000005 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000005 /* DashboardView.swift */; };
+		A00000000000000000000006 /* LocalBridgeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000008 /* LocalBridgeManager.swift */; };
+		A00000000000000000000007 /* akshare_server.py in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000009 /* akshare_server.py */; };
+		A00000000000000000000008 /* DebugLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000010 /* DebugLog.swift */; };
+		A00000000000000000000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000011 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+/* Begin PBXFileReference section */
+		B00000000000000000000001 /* AStockMonitorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AStockMonitorApp.swift; sourceTree = "<group>"; };
+		B00000000000000000000002 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		B00000000000000000000003 /* MarketService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarketService.swift; sourceTree = "<group>"; };
+		B00000000000000000000004 /* MonitorStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonitorStore.swift; sourceTree = "<group>"; };
+		B00000000000000000000005 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+		B00000000000000000000006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B00000000000000000000007 /* A 股盯盘.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "A 股盯盘.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		B00000000000000000000008 /* LocalBridgeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalBridgeManager.swift; sourceTree = "<group>"; };
+		B00000000000000000000009 /* akshare_server.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = service/akshare_server.py; sourceTree = "<group>"; };
+		B00000000000000000000010 /* DebugLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLog.swift; sourceTree = "<group>"; };
+		B00000000000000000000011 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+/* Begin PBXGroup section */
+		C00000000000000000000001 = {isa = PBXGroup; children = (C00000000000000000000002 /* AStockMonitor */, B00000000000000000000009 /* akshare_server.py */, C00000000000000000000003 /* Products */, ); sourceTree = "<group>"; };
+		C00000000000000000000002 /* AStockMonitor */ = {isa = PBXGroup; path = AStockMonitor; sourceTree = "<group>"; children = (B00000000000000000000001, B00000000000000000000002, B00000000000000000000003, B00000000000000000000004, B00000000000000000000005, B00000000000000000000006, B00000000000000000000008, B00000000000000000000010, B00000000000000000000011, ); };
+		C00000000000000000000003 /* Products */ = {isa = PBXGroup; name = Products; sourceTree = "<group>"; children = (B00000000000000000000007, ); };
+/* End PBXGroup section */
+/* Begin PBXNativeTarget section */
+		D00000000000000000000001 /* AStockMonitor */ = {isa = PBXNativeTarget; buildConfigurationList = E00000000000000000000002; buildPhases = (F00000000000000000000001 /* Sources */, F00000000000000000000002 /* Frameworks */, F00000000000000000000003 /* Resources */, ); buildRules = (); dependencies = (); name = AStockMonitor; productName = "A 股盯盘"; productReference = B00000000000000000000007; productType = "com.apple.product-type.application"; };
+/* End PBXNativeTarget section */
+/* Begin PBXProject section */
+		D00000000000000000000002 /* Project object */ = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastUpgradeCheck = 2700; }; buildConfigurationList = E00000000000000000000001; compatibilityVersion = "Xcode 14.0"; developmentRegion = zh_CN; hasScannedForEncodings = 0; knownRegions = (en, Base, zh_CN, ); mainGroup = C00000000000000000000001; productRefGroup = C00000000000000000000003; projectDirPath = ""; projectRoot = ""; targets = (D00000000000000000000001, ); };
+/* End PBXProject section */
+/* Begin PBXSourcesBuildPhase section */
+		F00000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001, A00000000000000000000002, A00000000000000000000003, A00000000000000000000004, A00000000000000000000005, A00000000000000000000006, A00000000000000000000008, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+/* Begin PBXFrameworksBuildPhase section */
+		F00000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+/* Begin PBXResourcesBuildPhase section */
+		F00000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000007, A00000000000000000000009, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+/* Begin XCBuildConfiguration section */
+		E00000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGNING_ALLOWED = NO; INFOPLIST_FILE = AStockMonitor/Info.plist; MACOSX_DEPLOYMENT_TARGET = 13.0; PRODUCT_BUNDLE_IDENTIFIER = com.codex.astockmonitor; PRODUCT_NAME = "A 股盯盘"; SWIFT_VERSION = 5.0; GENERATE_INFOPLIST_FILE = NO; OTHER_SWIFT_FLAGS = "$(inherited) -disable-sandbox"; }; name = Debug; };
+		E00000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGNING_ALLOWED = NO; DEAD_CODE_STRIPPING = YES; ENABLE_NS_ASSERTIONS = NO; INFOPLIST_FILE = AStockMonitor/Info.plist; MACOSX_DEPLOYMENT_TARGET = 13.0; PRODUCT_BUNDLE_IDENTIFIER = com.codex.astockmonitor; PRODUCT_NAME = "A 股盯盘"; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0; GENERATE_INFOPLIST_FILE = NO; OTHER_SWIFT_FLAGS = "$(inherited) -disable-sandbox"; }; name = Release; };
+		E00000000000000000000005 /* Project Debug */ = {isa = XCBuildConfiguration; buildSettings = {MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; SWIFT_VERSION = 5.0; }; name = Debug; };
+		E00000000000000000000006 /* Project Release */ = {isa = XCBuildConfiguration; buildSettings = {MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; SWIFT_VERSION = 5.0; }; name = Release; };
+/* End XCBuildConfiguration section */
+/* Begin XCConfigurationList section */
+		E00000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (E00000000000000000000005, E00000000000000000000006, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		E00000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (E00000000000000000000003, E00000000000000000000004, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = D00000000000000000000002;
+}
