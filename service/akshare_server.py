@@ -26,9 +26,9 @@ AKSHARE_AVAILABLE = importlib.util.find_spec("akshare") is not None
 # Bound upstream calls that do not specify their own requests timeout.
 socket.setdefaulttimeout(10)
 
-HOST, PORT, CACHE_SECONDS = "127.0.0.1", 8767, 2
+HOST, PORT, CACHE_SECONDS = "127.0.0.1", 8767, 1.5
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-API_VERSION = 19
+API_VERSION = 20
 INDEX_SYMBOLS = {
     "sh000001": "上证指数", "sz399001": "深证成指",
     "sz399006": "创业板指", "sh000680": "科创综指",
@@ -518,6 +518,101 @@ def limit_prices(code, name, price, change_percent, prev_close=None):
         return prev_close, None, None, exact
     return prev_close, _round_price(prev_close * (1 + ratio)), _round_price(prev_close * (1 - ratio)), exact
 
+# ---------------------------------------------------------------------------
+# 直连快照：东方财富 clist 并发分页 / 腾讯 qt.gtimg.cn 批量（约 0.15 秒全市场）
+# AkShare 的腾讯接口逐页串行请求，全市场要 6 秒以上；交易所一档快照约 3 秒一更新，
+# 直连后刷新间隔可以降到 3 秒。
+# ---------------------------------------------------------------------------
+fast_session_lock = threading.Lock()
+fast_session_holder = {"session": None}
+fast_executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="fast-quote")
+EASTMONEY_FAST_URL = ("https://push2.eastmoney.com/api/qt/clist/get?pn={pn}&pz=100&po=1&np=1&fltt=2&invt=2&fid=f12"
+                      "&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+                      "&fields=f2,f3,f5,f6,f8,f10,f12,f14,f15,f16,f17,f18,f20,f21")
+EASTMONEY_FAST_COLUMNS = {"f12": "代码", "f14": "名称", "f2": "最新价", "f3": "涨跌幅", "f5": "成交量", "f6": "成交额",
+                          "f8": "换手率", "f10": "量比", "f15": "最高", "f16": "最低", "f17": "今开", "f18": "昨收",
+                          "f20": "总市值", "f21": "流通市值"}
+
+def _fast_session():
+    with fast_session_lock:
+        if fast_session_holder["session"] is None:
+            import requests
+            from requests.adapters import HTTPAdapter
+            session = requests.Session()
+            session.headers.update({"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"})
+            adapter = HTTPAdapter(pool_connections=4, pool_maxsize=32)
+            session.mount("https://", adapter)
+            fast_session_holder["session"] = session
+        return fast_session_holder["session"]
+
+def fetch_eastmoney_fast():
+    import pandas as pd
+    session = _fast_session()
+
+    def page(pn):
+        last_error = None
+        for attempt in range(3):
+            try:
+                data = session.get(EASTMONEY_FAST_URL.format(pn=pn), timeout=4).json().get("data") or {}
+                return data.get("diff") or [], data.get("total") or 0
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.15 * (attempt + 1))
+        raise RuntimeError(f"东方财富第 {pn} 页失败：{last_error}")
+
+    first, total = page(1)
+    if not total:
+        raise RuntimeError("东方财富返回空列表")
+    pages = (total + 99) // 100
+    rows = list(first)
+    for diff, _ in fast_executor.map(page, range(2, pages + 1)):
+        rows.extend(diff)
+    if len(rows) < total * 0.95:
+        raise RuntimeError(f"东方财富快照不完整：{len(rows)}/{total}")
+    frame = pd.DataFrame(rows).rename(columns=EASTMONEY_FAST_COLUMNS)
+    return frame
+
+def _tencent_symbol(code):
+    if code.startswith(("6", "9")) and not code.startswith("92"):
+        return "sh" + code
+    if code.startswith(("8", "4", "92")):
+        return "bj" + code
+    return "sz" + code
+
+def fetch_tencent_fast():
+    """Direct qt.gtimg.cn batches; needs a code list from an earlier snapshot."""
+    import pandas as pd
+    codes = next((([row["code"] for row in rows]) for rows in cache_by_provider.values() if rows), None)
+    if not codes:
+        raise RuntimeError("腾讯直连需要先有一次全市场代码列表")
+    session = _fast_session()
+
+    def batch(group):
+        response = session.get("https://qt.gtimg.cn/q=" + ",".join(_tencent_symbol(c) for c in group), timeout=4)
+        response.encoding = "gbk"
+        out = []
+        for line in response.text.split(";"):
+            if '="' not in line:
+                continue
+            f = line.split('="', 1)[1].split("~")
+            if len(f) < 50:
+                continue
+            def num(index, scale=1.0):
+                try:
+                    return float(f[index]) * scale
+                except (TypeError, ValueError):
+                    return None
+            out.append({"代码": f[2], "名称": f[1], "最新价": num(3), "昨收": num(4), "今开": num(5),
+                        "成交量": num(6), "涨跌幅": num(32), "最高": num(33), "最低": num(34),
+                        "成交额": num(37, 1e4), "换手率": num(38), "流通市值": num(44, 1e8), "总市值": num(45, 1e8),
+                        "量比": num(49)})
+        return out
+    groups = [codes[i:i + 600] for i in range(0, len(codes), 600)]
+    rows = [row for part in fast_executor.map(batch, groups) for row in part]
+    if len(rows) < len(codes) * 0.9:
+        raise RuntimeError(f"腾讯直连快照不完整：{len(rows)}/{len(codes)}")
+    return pd.DataFrame(rows)
+
 def get_market(provider="auto"):
     with provider_locks_guard:
         lock = provider_locks.setdefault(provider, threading.Lock())
@@ -541,13 +636,15 @@ def _get_market_locked(provider):
         raise RuntimeError(f"{provider} 数据源暂不可用，30 秒冷却中：{previous_error}")
     import akshare as ak
     funcs = {
+        "eastmoney_fast": ("EastmoneyFast", fetch_eastmoney_fast),
+        "tencent_fast": ("TencentFast", fetch_tencent_fast),
         "eastmoney": ("Eastmoney", ak.stock_zh_a_spot_em),
         "tencent": ("Tencent", ak.stock_zh_a_spot_tx),
         "sina": ("Sina", ak.stock_zh_a_spot),
     }
     # Tencent's paged snapshot is much faster on a cold start. Eastmoney remains
     # the fallback because it provides a wider set of fields but may take a minute.
-    order = ["tencent", "eastmoney", "sina"] if provider == "auto" else [provider]
+    order = ["eastmoney_fast", "tencent_fast", "tencent", "eastmoney", "sina"] if provider == "auto" else [provider]
     errors = []
     frame = None
     source = ""

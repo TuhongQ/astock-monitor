@@ -106,13 +106,17 @@ import AppKit
         }
         DebugLog.write("启动恢复状态栏列表：来源=watchlist.json, 股票=\(watch.menuBarCodes.joined(separator: ",")), 缓存行情=\(menuBarQuoteCache.count) 只")
 
-        // Do not keep obsolete 2/5-second preferences that cause skipped ticks
-        // against a full-market provider whose measured snapshot takes ~7 sec.
-        if settings.refreshSeconds < 10 {
-            settings.refreshSeconds = 10
-            AppFiles.write(settings, name: "settings.json")
-            DebugLog.write("刷新间隔已校正为 10 秒：全市场行情单轮约需 7 秒")
+        // The bridge now reads Eastmoney / Tencent directly (~0.5 s per full-market
+        // snapshot instead of ~7 s), and exchange Level-1 snapshots update about every
+        // 3 s. Move the old 10-second default to 3 seconds once.
+        if !UserDefaults.standard.bool(forKey: "refresh.fastFeed.v1") {
+            UserDefaults.standard.set(true, forKey: "refresh.fastFeed.v1")
+            if settings.refreshSeconds == 10 {
+                settings.refreshSeconds = 3
+                DebugLog.write("刷新间隔改为 3 秒：已切换直连快照（全市场约 0.5 秒）")
+            }
         }
+        if settings.refreshSeconds < 3 { settings.refreshSeconds = 3 }
     }
 
     private func restoreAlertLogRetention() {
@@ -400,7 +404,7 @@ import AppKit
     /// expired, avoiding a useless 304 just before the next full-market fetch.
     private func scheduleNextRefresh(after elapsed: TimeInterval) {
         guard monitoringActive else { return }
-        let cacheExpiryBuffer: TimeInterval = 2.5
+        let cacheExpiryBuffer: TimeInterval = 1.6
         let delay = max(cacheExpiryBuffer, TimeInterval(settings.refreshSeconds) - elapsed)
         DebugLog.write("下次行情刷新计划：\(String(format: "%.2f", delay))s 后；本轮耗时=\(String(format: "%.2f", elapsed))s, 目标周期=\(settings.refreshSeconds)s")
         timer?.invalidate()
@@ -447,7 +451,7 @@ import AppKit
         var normalizedSettings = newSettings
         normalizedSettings.threshold = min(max(normalizedSettings.threshold, 0), 30)
         normalizedSettings.rapidThreshold = min(max(normalizedSettings.rapidThreshold, 0), 30)
-        if normalizedSettings.refreshSeconds < 10 { normalizedSettings.refreshSeconds = 10 }
+        if normalizedSettings.refreshSeconds < 3 { normalizedSettings.refreshSeconds = 3 }
         if ![10, 30, 60, 180, 300, 600].contains(normalizedSettings.cooldownSeconds) { normalizedSettings.cooldownSeconds = 180 }
         if ![10, 30, 60, 180, 300, 600].contains(normalizedSettings.rapidCooldownSeconds) { normalizedSettings.rapidCooldownSeconds = 180 }
         if ![30, 60, 120, 180, 300].contains(normalizedSettings.windowSeconds) { normalizedSettings.windowSeconds = 60 }
@@ -478,7 +482,7 @@ import AppKit
         }
     }
     private func providerName(_ value: String) -> String {
-        switch value { case "eastmoney": "东方财富"; case "tencent": "腾讯"; case "sina": "新浪"; default: "自动数据源" }
+        switch value { case "eastmoney_fast": "东方财富直连"; case "tencent_fast": "腾讯直连"; case "eastmoney": "东方财富"; case "tencent": "腾讯"; case "sina": "新浪"; default: "自动（直连）" }
     }
     private func ingest(_ quote: Quote, at now: Date) {
         var chartPoints = intradayHistory[quote.code, default: []]

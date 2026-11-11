@@ -232,7 +232,7 @@ struct MonitorSettings: Codable {
     var windowSeconds = 60
     // Tencent full-market snapshot takes about 7 seconds in observed runs.
     // A 10-second cadence allows a fresh request after each completed snapshot.
-    var refreshSeconds = 10
+    var refreshSeconds = 3
     var cooldownSeconds = 180
     var rapidCooldownSeconds = 180
     var volumeMultiple = 1.0
@@ -267,7 +267,7 @@ struct MonitorSettings: Codable {
         threshold = min(max(try values.decodeIfPresent(Double.self, forKey: .threshold) ?? 5.0, 0), 30)
         rapidThreshold = min(max(try values.decodeIfPresent(Double.self, forKey: .rapidThreshold) ?? 3.0, 0), 30)
         windowSeconds = min(max(try values.decodeIfPresent(Int.self, forKey: .windowSeconds) ?? 60, 30), 300)
-        refreshSeconds = try values.decodeIfPresent(Int.self, forKey: .refreshSeconds) ?? 10
+        refreshSeconds = try values.decodeIfPresent(Int.self, forKey: .refreshSeconds) ?? 3
         // Keep settings.json files from older app versions working. Older builds
         // stored cooldown in minutes; new builds store it in seconds.
         let legacyCooldownMinutes = try values.decodeIfPresent(Int.self, forKey: .cooldownMinutes)

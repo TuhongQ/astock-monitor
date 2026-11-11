@@ -2345,12 +2345,12 @@ struct SettingsView: View {
                             }.labelsHidden().frame(width: 180)
                         }
                         HStack {
-                            settingLabel("刷新间隔", detail: "全市场行情轮询频率"); Spacer()
+                            settingLabel("刷新间隔", detail: "全市场行情轮询频率（交易所一档快照约 3 秒更新一次）"); Spacer()
                             Picker("刷新间隔", selection: $draft.refreshSeconds) {
-                                Text("10 秒（推荐）").tag(10); Text("15 秒").tag(15); Text("30 秒").tag(30); Text("60 秒").tag(60)
+                                Text("3 秒（推荐）").tag(3); Text("5 秒").tag(5); Text("10 秒").tag(10); Text("15 秒").tag(15); Text("30 秒").tag(30); Text("60 秒").tag(60)
                             }.labelsHidden().frame(width: 180)
                         }
-                        if draft.refreshSeconds > 10 {
+                        if draft.refreshSeconds > 5 {
                             Text("速拉在窗口内连续快照中寻找最低价；刷新间隔越长，采样越稀疏，越可能错过短时波动。告警中会显示实际区间和起止价。")
                                 .font(.caption2).foregroundStyle(.orange)
                         }
@@ -2397,11 +2397,13 @@ struct SettingsView: View {
                         HStack {
                             settingLabel("数据源", detail: "选择行情接口及回退顺序"); Spacer()
                             Picker("数据源", selection: $draftProvider) {
-                                Text("自动切换（腾讯 → 东财 → 新浪）").tag("auto")
-                                Text("东方财富").tag("eastmoney")
-                                Text("腾讯").tag("tencent")
-                                Text("新浪").tag("sina")
-                            }.labelsHidden().frame(width: 260)
+                                Text("自动（东财直连 → 腾讯直连 → AkShare）").tag("auto")
+                                Text("东方财富直连（约 0.5 秒）").tag("eastmoney_fast")
+                                Text("腾讯直连（约 0.5 秒）").tag("tencent_fast")
+                                Text("东方财富（AkShare，较慢）").tag("eastmoney")
+                                Text("腾讯（AkShare，约 6 秒）").tag("tencent")
+                                Text("新浪（AkShare，较慢）").tag("sina")
+                            }.labelsHidden().frame(width: 300)
                         }
                         HStack(spacing: 10) { settingLabel("服务地址", detail: "本机行情桥接服务"); TextField("http://127.0.0.1:8767", text: $serviceURL).textFieldStyle(.roundedBorder) }
                         HStack(spacing: 10) {
