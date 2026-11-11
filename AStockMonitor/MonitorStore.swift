@@ -76,6 +76,41 @@ import AppKit
     private var limitDownToday: Set<String> = []
     private var limitDayKey = ""
     @Published private(set) var potentialReport: PotentialReport?
+    /// 个股分析 page state.
+    @Published var analysisQuery = ""
+    @Published private(set) var analysis: StockAnalysis?
+    @Published private(set) var analysisLoading = false
+    @Published private(set) var analysisError: String?
+    @Published private(set) var analysisHistory: [String] = UserDefaults.standard.stringArray(forKey: "analysis.history") ?? []
+    private var analysisTask: Task<Void, Never>?
+
+    /// Run /analyze for a code or name; remembers the last 12 analysed stocks.
+    func analyze(_ raw: String) {
+        let query = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        analysisQuery = query
+        analysisTask?.cancel()
+        analysisLoading = true
+        analysisError = nil
+        let currentProvider = provider
+        analysisTask = Task {
+            do {
+                let result = try await service.fetchAnalysis(query: query, provider: currentProvider)
+                guard !Task.isCancelled else { return }
+                analysis = result
+                if result.error == nil, let code = result.code, let name = result.name {
+                    let entry = "\(code) \(name)"
+                    analysisHistory = [entry] + analysisHistory.filter { $0 != entry }.prefix(11)
+                    UserDefaults.standard.set(analysisHistory, forKey: "analysis.history")
+                    DebugLog.write("个股分析 \(entry)：指数 \(result.index ?? -1)，\(result.verdict ?? "")")
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                analysisError = error.localizedDescription
+            }
+            analysisLoading = false
+        }
+    }
     @Published private(set) var potentialError: String?
     private var potentialRequestInFlight = false
     private var lastPotentialRequest = Date.distantPast

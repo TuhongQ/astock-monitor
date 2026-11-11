@@ -18,7 +18,7 @@ import Foundation
     /// never run two installs at once.
     private var pythonPreparation: Task<String?, Never>?
 
-    private static let apiVersion = 20
+    private static let apiVersion = 21
     private static let port = 8767
 
     private enum Health: Equatable { case ready, stale, missingAkShare, unavailable }

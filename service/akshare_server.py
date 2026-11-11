@@ -28,7 +28,7 @@ socket.setdefaulttimeout(10)
 
 HOST, PORT, CACHE_SECONDS = "127.0.0.1", 8767, 1.5
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-API_VERSION = 20
+API_VERSION = 21
 INDEX_SYMBOLS = {
     "sh000001": "上证指数", "sz399001": "深证成指",
     "sz399006": "创业板指", "sh000680": "科创综指",
@@ -2923,6 +2923,376 @@ def stock_news(code):
     print(f"Stock news ready for {code}: {len(items)} items", flush=True)
     return items[:20]
 
+# ---------------------------------------------------------------------------
+# 个股分析：输入代码或名称，给出规则评分（推荐指数）、操作建议与回测概率
+# ---------------------------------------------------------------------------
+# 5-day outlook logistic models fitted on 1,490 random A-shares (2026-01 → 11,
+# ~283k stock-days; out-of-sample after 2026-07). Direction itself was NOT
+# predictable (AUC 0.50); these models estimate the size of the move:
+# P(5-day return > +5%) AUC 0.60, P(5-day return < -5%) AUC 0.69, both mainly
+# driven by volatility.
+SWING_FEATS = ["chg", "limitPct", "pos", "upper", "ret5", "ret20", "ret60", "bias20", "bias60", "maBull", "ma20Up",
+               "maSpread", "amtRatioL", "volTrendL", "trL", "vol10", "volRatio", "toHigh60", "toLow60", "brk20", "macd",
+               "difPos", "limitUp", "limits10", "lnAmt", "gem"]
+SWING_CLIP = {"chg": (-9.016, 10.039), "limitPct": (-0.752, 1.0), "pos": (0.0, 1.0), "upper": (0.0, 9.703),
+              "ret5": (-18.735, 24.947), "ret20": (-34.243, 54.375), "ret60": (-41.117, 112.379),
+              "bias20": (-21.653, 26.889), "bias60": (-29.499, 51.158), "maBull": (0.0, 1.0), "ma20Up": (0.0, 1.0),
+              "maSpread": (0.335, 23.785), "amtRatioL": (-0.858, 1.21), "volTrendL": (-0.864, 0.828),
+              "trL": (-1.386, 2.988), "vol10": (0.763, 8.082), "volRatio": (0.342, 1.925), "toHigh60": (-50.447, -0.609),
+              "toLow60": (0.2, 129.196), "brk20": (0.0, 1.0), "macd": (-3.973, 2.867), "difPos": (0.0, 1.0),
+              "limitUp": (0.0, 1.0), "limits10": (0.0, 2.0), "lnAmt": (7.243, 9.829), "gem": (0.0, 1.0)}
+SWING_MU = [-0.09728, -0.00577, 0.46538, 2.31283, -0.30962, 0.27888, 4.10872, -0.52138, 0.25459, 0.17982, 0.44462,
+            5.10942, -0.05345, -0.04658, 0.8971, 2.96072, 1.01785, -17.41837, 20.01435, 0.04808, -0.11804, 0.43679,
+            0.01498, 0.13729, 8.28127, 0.37061]
+SWING_SD = [3.23356, 0.26946, 0.30198, 1.95768, 7.28384, 15.17045, 27.15103, 8.0672, 14.48688, 0.38404, 0.49693,
+            4.05884, 0.38646, 0.33631, 0.90959, 1.51963, 0.34955, 10.42961, 24.95056, 0.21394, 1.07278, 0.49599,
+            0.12148, 0.42112, 0.57111, 0.48297]
+SWING_W_BIG = [-1.63395, 0.05013, -0.02189, -0.03932, 0.08358, -0.08476, -0.08375, -0.13068, 0.05714, 0.02339,
+               -0.00494, 0.00921, -0.01249, -0.03914, -0.00352, 0.07756, 0.18633, -0.0963, 0.00216, 0.20312, 0.02603,
+               0.08336, 0.03132, 0.09039, -0.06832, 0.14114, 0.03533]
+SWING_W_DROP = [-1.19753, 0.02644, -0.00162, 0.22881, 0.25251, 0.08587, 0.09318, -0.00307, -0.22205, -0.04905,
+                0.06787, -0.01534, -0.03843, -0.01373, 0.00227, 0.17602, 0.32059, -0.25336, 0.03879, -0.01443,
+                -0.00776, 0.02327, 2e-05, -0.01327, 0.06121, 0.03198, 0.03137]
+SWING_BASE_BIG, SWING_BASE_DROP = 17.5, 21.0   # market-wide averages (%) for comparison
+
+def _swing_probabilities(q, history, now):
+    """P(5-day return > +5%) and P(< -5%) with today's live bar appended."""
+    today = now.strftime("%Y-%m-%d")
+    bars = [b for b in history if b.get("date") != today]
+    if len(bars) < 70:
+        return None
+    price = q["price"]
+    fraction = _volume_fraction(now)
+    prev = bars[-1]["close"]
+    if abs(prev - price) < 0.006 and abs((prev / bars[-2]["close"] - 1) * 100 - (q.get("changePercent") or 0)) < 0.06:
+        bars = bars[:-1]          # cache already holds today's bar (after the close)
+        prev = bars[-1]["close"]
+    high, low = q.get("high") or price, q.get("low") or price
+    closes = [b["close"] for b in bars] + [price]
+    highs = [b["high"] for b in bars] + [high]
+    lows = [b["low"] for b in bars] + [low]
+    amounts = [b.get("amount", 0) for b in bars]
+    today_amount = (q.get("amount") or 0) / max(fraction, 0.03)
+    ratio = limit_ratio(q["code"], q.get("name", "")) or 0.1
+
+    def sma(values, n, end=None):
+        window = values[:end][-n:] if end else values[-n:]
+        return sum(window) / len(window)
+    ma5, ma10, ma20, ma60 = (sma(closes, n) for n in (5, 10, 20, 60))
+    ma20_prev = sma(closes, 20, end=-5)
+    returns = [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes))]
+    def std(values):
+        m = sum(values) / len(values)
+        return math.sqrt(sum((v - m) ** 2 for v in values) / max(len(values) - 1, 1))
+    ema12 = ema26 = closes[0]
+    difs = []
+    for c in closes:
+        ema12 = 2 / 13 * c + 11 / 13 * ema12
+        ema26 = 2 / 27 * c + 25 / 27 * ema26
+        difs.append(ema12 - ema26)
+    dea = difs[0]
+    for d in difs:
+        dea = 0.2 * d + 0.8 * dea
+    avg5 = sum(amounts[-5:]) / 5 if len(amounts) >= 5 else 0
+    avg20 = sum(amounts[-20:]) / 20 if len(amounts) >= 20 else 0
+    limit_hits = [closes[i] >= round(closes[i - 1] * (1 + ratio), 2) - 0.005 for i in range(len(closes) - 10, len(closes))]
+    change = (price / prev - 1) * 100
+    turnover = (q.get("turnover") or 0) / max(fraction, 0.03) if q.get("turnover") is not None else None
+    spread_values = [ma5, ma10, ma20]
+    raw = {
+        "chg": change, "limitPct": change / (ratio * 100),
+        "pos": (price - low) / (high - low) if high > low else 1.0, "upper": (high - price) / prev * 100,
+        "ret5": (price / closes[-6] - 1) * 100, "ret20": (price / closes[-21] - 1) * 100, "ret60": (price / closes[-61] - 1) * 100,
+        "bias20": (price / ma20 - 1) * 100, "bias60": (price / ma60 - 1) * 100,
+        "maBull": 1.0 if ma5 > ma10 > ma20 > ma60 else 0.0, "ma20Up": 1.0 if ma20 > ma20_prev else 0.0,
+        "maSpread": (max(spread_values) - min(spread_values)) / price * 100,
+        "amtRatioL": math.log(min(max(today_amount / avg5, 0.1), 20)) if avg5 > 0 else 0.0,
+        "volTrendL": math.log(min(max(avg5 / avg20, 0.1), 10)) if avg20 > 0 else 0.0,
+        "trL": math.log(min(max(turnover, 0.1), 60)) if turnover is not None else SWING_MU[14],
+        "vol10": std(returns[-10:]) * 100,
+        "volRatio": min(std(returns[-10:]) / max(std(returns[-60:]), 1e-9), 4),
+        "toHigh60": (price / max(highs[-60:]) - 1) * 100, "toLow60": (price / min(lows[-60:]) - 1) * 100,
+        "brk20": 1.0 if price > max(highs[-21:-1]) else 0.0,
+        "macd": (difs[-1] - dea) / price * 100, "difPos": 1.0 if difs[-1] > 0 else 0.0,
+        "limitUp": 1.0 if q.get("upperLimit") else 0.0, "limits10": float(sum(limit_hits)),
+        "lnAmt": math.log10(max(today_amount, 1)), "gem": 1.0 if ratio >= 0.2 else 0.0,
+    }
+    z = [1.0] + [(min(max(raw[name], SWING_CLIP[name][0]), SWING_CLIP[name][1]) - mu) / sd
+                 for name, mu, sd in zip(SWING_FEATS, SWING_MU, SWING_SD)]
+    logistic = lambda w: 1 / (1 + math.exp(-sum(a * b for a, b in zip(w, z))))
+    return {"pBig": logistic(SWING_W_BIG) * 100, "pDrop": logistic(SWING_W_DROP) * 100, "raw": raw,
+            "ma": {"MA5": ma5, "MA10": ma10, "MA20": ma20, "MA60": ma60}, "dif": difs[-1], "dea": dea,
+            "high20": max(highs[-21:-1]), "high60": max(highs[-61:-1]), "low20": min(lows[-21:-1]),
+            "amountRatio": today_amount / avg5 if avg5 > 0 else None}
+
+def resolve_stock(query, provider="auto"):
+    query = (query or "").strip()
+    rows = _market_rows(provider)
+    digits = "".join(ch for ch in query if ch.isdigit())
+    if len(digits) == 6:
+        row = next((r for r in rows if r["code"] == digits), None)
+        return (row, []) if row else (None, [])
+    upper = query.upper()
+    exact = [r for r in rows if r.get("name", "").upper().replace(" ", "") == upper.replace(" ", "")]
+    if exact:
+        return exact[0], []
+    matches = [r for r in rows if upper and upper in r.get("name", "").upper()]
+    if len(matches) == 1:
+        return matches[0], []
+    return None, [{"code": r["code"], "name": r["name"]} for r in matches[:12]]
+
+def analyze_stock(query, provider="auto"):
+    base, candidates = resolve_stock(query, provider)
+    if base is None:
+        return {"error": "没有找到这只股票" if not candidates else "匹配到多只股票，请选择", "candidates": candidates}
+    code = base["code"]
+    with classification_lock:
+        industry = industry_by_code.get(code, "")
+        concepts = _useful_concepts(sorted(concepts_by_code.get(code, ())))
+    q = dict(base, industry=industry)
+    now = datetime.now(SHANGHAI_TZ)
+    price = q.get("price") or 0
+    if q.get("suspended") or price <= 0:
+        return {"error": "该股停牌或暂无报价", "candidates": []}
+    history = cached_daily(code)
+    if history is None:
+        try:
+            history, _ = fetch_daily_rows(code, "year")
+        except Exception as exc:
+            print(f"Analyze daily fetch failed for {code}: {exc}", flush=True)
+            history = None
+    swing = _swing_probabilities(q, history, now) if history else None
+    features = daily_features(q, history, now) if history else None
+    payload = potential_payload(provider)
+    market, emotion = payload.get("market") or {}, payload.get("emotion") or {}
+    matches = []
+    for meta in STRATEGY_META:
+        entry = next((s for s in payload["lists"].get(meta["id"], []) if s["code"] == code), None)
+        if entry and meta["id"] != "all":
+            matches.append({"strategy": meta["id"], "title": meta["title"], "score": entry["score"], "grade": entry["grade"],
+                            "signals": entry.get("signals", [])[:3]})
+    on = overnight_features(q, now)
+    p3 = p5 = None
+    if on and q.get("high") and q.get("low"):
+        p3, p5, _ = overnight_scores(on[0])
+    live = _session_minute(now) is not None
+    metrics = tick_metrics(code, q) if live else {}
+    surges = surge_events_snapshot().get(code, [])
+    zt = zt_snapshot()
+    sealed_info = zt["pool"].get(code)
+    broken_info = zt["broken"].get(code)
+
+    components, signals, risks = [], [], []
+    def component(name, score, maximum, detail):
+        components.append({"name": name, "score": round(max(min(score, maximum), 0), 1), "max": maximum, "detail": detail})
+
+    # 1. 趋势（25）
+    trend, trend_notes = 0.0, []
+    if swing:
+        ma, raw = swing["ma"], swing["raw"]
+        if raw["maBull"]:
+            trend += 9; trend_notes.append("均线多头排列")
+        if price > ma["MA20"]:
+            trend += 5; trend_notes.append("站上 20 日线")
+        else:
+            trend_notes.append("在 20 日线下方")
+        if price > ma["MA60"]:
+            trend += 4; trend_notes.append("站上 60 日线")
+        if raw["ma20Up"]:
+            trend += 3; trend_notes.append("20 日线向上")
+        if swing["dif"] > swing["dea"]:
+            trend += 4 if swing["dif"] > 0 else 2
+            trend_notes.append("MACD 多头" + ("（零轴上）" if swing["dif"] > 0 else ""))
+        else:
+            trend_notes.append("MACD 空头")
+    component("趋势", trend, 25, "，".join(trend_notes) or "日线不足")
+
+    # 2. 动量与位置（15）
+    momentum, mom_notes = 0.0, []
+    if swing:
+        raw = swing["raw"]
+        r20, b20 = raw["ret20"], raw["bias20"]
+        if 0 < r20 <= 25:
+            momentum += 7; mom_notes.append(f"20 日涨 {r20:.1f}%，强而不过热")
+        elif r20 > 25:
+            momentum += 3; mom_notes.append(f"20 日涨 {r20:.1f}%，短期过热")
+        else:
+            mom_notes.append(f"20 日 {r20:+.1f}%")
+        if raw["brk20"]:
+            momentum += 5; mom_notes.append("突破 20 日高点")
+        elif raw["toHigh60"] > -5:
+            momentum += 3; mom_notes.append("接近 60 日高点")
+        if b20 > 15:
+            momentum -= 4; risks.append(f"偏离 20 日线 {b20:.1f}%，追高风险")
+        elif -3 <= b20 <= 6:
+            momentum += 3
+    component("动量与位置", momentum, 15, "，".join(mom_notes) or "—")
+
+    # 3. 量能（15）
+    volume, vol_notes = 0.0, []
+    ratio = swing["amountRatio"] if swing else None
+    change = q.get("changePercent") or 0
+    if ratio is not None:
+        if 1.2 <= ratio <= 3 and change > 0:
+            volume += 8; vol_notes.append(f"放量上涨（成交额为 5 日均值 {ratio:.1f} 倍）")
+        elif ratio > 3 and change > 0:
+            volume += 4; vol_notes.append(f"巨量（{ratio:.1f} 倍），分歧大")
+        elif ratio > 1.5 and change < 0:
+            volume -= 2; vol_notes.append(f"放量下跌（{ratio:.1f} 倍）")
+            risks.append("放量下跌，资金在离场")
+        elif ratio < 0.8:
+            volume += 3 if change >= 0 else 4; vol_notes.append(f"缩量（{ratio:.1f} 倍）")
+        else:
+            volume += 4; vol_notes.append(f"量能平稳（{ratio:.1f} 倍）")
+    if features and features["downAmount"]:
+        updown = features["upAmount"] / features["downAmount"]
+        if updown >= 1.5:
+            volume += 5; vol_notes.append(f"近 20 日红肥绿瘦（{updown:.1f}）")
+        elif updown < 0.8:
+            vol_notes.append(f"近 20 日绿肥红瘦（{updown:.1f}）")
+        else:
+            volume += 2
+    component("量能", volume, 15, "，".join(vol_notes) or "—")
+
+    # 4. 盘中（10）
+    intraday, intra_notes = 5.0, []
+    high, low = q.get("high"), q.get("low")
+    if high and low and high > low:
+        position = (price - low) / (high - low)
+        intraday += (position - 0.5) * 6
+        intra_notes.append(f"日内位置 {position * 100:.0f}%")
+    if on and on[1].get("vwap"):
+        dev = (price / on[1]["vwap"] - 1) * 100
+        intraday += 1.5 if dev > 0 else -1.5
+        intra_notes.append(f"{'高于' if dev > 0 else '低于'}分时均价 {abs(dev):.1f}%")
+    if surges:
+        intraday += 2; intra_notes.append(f"今日速拉 {len(surges)} 次")
+    if metrics.get("speed5") is not None:
+        intra_notes.append(f"5 分钟涨速 {metrics['speed5']:+.2f}%")
+    if sealed_info:
+        intraday = 10; intra_notes.append(f"已封涨停（{sealed_info.get('firstTime') or '—'} 首封）")
+        risks.append("已封涨停，排队难买入")
+    elif broken_info:
+        intraday -= 2; intra_notes.append("今日炸板"); risks.append("今日冲板失败（炸板），抛压较重")
+    component("盘中", intraday, 10, "，".join(intra_notes) or "—")
+
+    # 5. 策略共振（15）
+    best = max((m["score"] for m in matches), default=0)
+    strat = best / 100 * 12 + min(len(matches), 3)
+    component("策略共振", strat, 15, "、".join(f"{m['title']} {m['score']}" for m in matches) or "未入选任何选股策略")
+
+    # 6. 环境（10）
+    env, env_notes = 5.0, []
+    regime = market.get("regime")
+    if regime == "强势":
+        env += 3; env_notes.append("市场强势")
+    elif regime == "弱势":
+        env -= 3; env_notes.append("市场弱势")
+    elif regime:
+        env_notes.append("市场震荡")
+    mood = emotion.get("mood")
+    if mood in ("高潮", "回暖"):
+        env += 2
+    elif mood == "退潮":
+        env -= 2
+    if mood:
+        env_notes.append(f"打板情绪{mood}")
+    if industry and industry in (market.get("strongIndustries") or []):
+        env += 2; env_notes.append(f"所属行业「{industry}」领涨")
+    component("市场环境", env, 10, "，".join(env_notes) or "—")
+
+    # 7. 风险扣分（最多 -20）
+    penalty = 0.0
+    if swing:
+        raw = swing["raw"]
+        if raw["ret20"] > 50:
+            penalty += 8; risks.append(f"20 日涨幅 {raw['ret20']:.0f}%，高位")
+        if raw["vol10"] > 5:
+            penalty += 4; risks.append(f"近 10 日日波动 {raw['vol10']:.1f}%，波动剧烈")
+        if swing["pDrop"] > 35:
+            penalty += 4; risks.append(f"模型估计 5 日内跌超 5% 的概率 {swing['pDrop']:.0f}%（全市场约 {SWING_BASE_DROP:.0f}%）")
+        if price < swing["ma"]["MA20"] and price < swing["ma"]["MA60"]:
+            penalty += 3
+    streak = (sealed_info or {}).get("streak") or 0
+    if streak >= 4:
+        penalty += 5; risks.append(f"{streak} 连板高位，接力风险大")
+    if "ST" in q.get("name", "").upper():
+        penalty += 10; risks.append("ST 股，有退市风险")
+    penalty = min(penalty, 20)
+    if penalty:
+        components.append({"name": "风险扣分", "score": -round(penalty, 1), "max": 0, "detail": "见风险提示"})
+
+    total = sum(c["score"] for c in components if c["max"] > 0) - penalty
+    index = int(round(max(0, min(total, 100))))
+    above20 = swing is not None and price > swing["ma"]["MA20"]
+    trend_down = swing is not None and price < swing["ma"]["MA20"] and swing["dif"] < swing["dea"]
+    if index >= 72 and above20 and not sealed_info:
+        verdict, tone = "买入", "buy"
+        holder = "持有，跌破止损位再走"
+    elif index >= 60:
+        verdict, tone = "逢低关注", "watch"
+        holder = "持有，冲高可分批止盈"
+    elif index >= 45:
+        verdict, tone = "观望", "neutral"
+        holder = "持有观察，跌破支撑减仓" if not trend_down else "减仓，等待重新站上 20 日线"
+    elif index >= 32:
+        verdict, tone = "减仓", "reduce"
+        holder = "逢反弹减仓"
+    else:
+        verdict, tone = "卖出 / 回避", "sell"
+        holder = "卖出，趋势转弱"
+    if sealed_info and verdict == "买入":
+        verdict = "逢低关注"
+    buyer = {"buy": "可分批买入，设好止损", "watch": "等回踩支撑再考虑", "neutral": "暂不买入",
+             "reduce": "不买入", "sell": "回避"}[tone]
+
+    levels = []
+    if swing:
+        ma = swing["ma"]
+        supports = sorted([(v, k) for k, v in ma.items() if v < price] + [(swing["low20"], "20 日低点")], reverse=True)
+        resistances = sorted([(v, k) for k, v in (("20 日高点", swing["high20"]), ("60 日高点", swing["high60"])) if v > price])
+        if supports:
+            levels.append({"label": "支撑", "price": round(supports[0][0], 2), "note": supports[0][1]})
+        if resistances:
+            levels.append({"label": "压力", "price": round(resistances[0][0], 2), "note": resistances[0][1]})
+        stop_base = supports[0][0] if supports else price * 0.95
+        stop = round(max(min(stop_base * 0.98, price * 0.97), price * 0.92), 2)
+        levels.append({"label": "止损参考", "price": stop, "note": f"距现价 {(stop / price - 1) * 100:.1f}%"})
+        if resistances:
+            levels.append({"label": "目标参考", "price": round(resistances[0][0], 2),
+                           "note": f"距现价 {(resistances[0][0] / price - 1) * 100:+.1f}%"})
+
+    probabilities = []
+    if swing:
+        probabilities.append({"label": "5 日内涨超 5%", "value": round(swing["pBig"], 1), "baseline": SWING_BASE_BIG,
+                              "note": "回测 AUC 0.60"})
+        probabilities.append({"label": "5 日内跌超 5%", "value": round(swing["pDrop"], 1), "baseline": SWING_BASE_DROP,
+                              "note": "回测 AUC 0.69"})
+    if p3 is not None:
+        probabilities.append({"label": "次日盘中冲高 ≥3%", "value": round(p3 * 100, 1), "baseline": 25.0, "note": "尾盘隔夜模型"})
+        probabilities.append({"label": "次日盘中冲高 ≥5%", "value": round(p5 * 100, 1), "baseline": 12.0, "note": "尾盘隔夜模型"})
+
+    for c in components:
+        if c["max"] and c["score"] >= c["max"] * 0.7:
+            signals.append(f"{c['name']}：{c['detail']}")
+    news = []
+    try:
+        news = [{"title": n["title"], "time": n["time"], "url": n["url"]} for n in stock_news(code)[:5]]
+    except Exception as exc:
+        print(f"Analyze news failed for {code}: {exc}", flush=True)
+
+    return {
+        "code": code, "name": q.get("name", ""), "industry": industry or None, "concepts": concepts[:10],
+        "price": price, "changePercent": change, "updatedAt": now.isoformat(timespec="seconds"),
+        "index": index, "verdict": verdict, "tone": tone,
+        "advice": {"未持有": buyer, "已持有": holder},
+        "components": components, "probabilities": probabilities, "levels": levels,
+        "signals": signals, "risks": list(dict.fromkeys(risks)), "strategies": matches, "news": news,
+        "notes": ["推荐指数为趋势、动量、量能、盘中、策略、环境六项规则打分减去风险扣分，不是对涨跌的预测。",
+                  "回测（1490 只个股，2026 年）显示：日线技术指标无法预测 5 日涨跌方向（AUC 0.50），能预测的主要是波动大小；概率栏数字即这类模型的结果，括号内为全市场平均。",
+                  "仅供参考，不构成投资建议。"],
+    }
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, data, status=200, headers=None):
         body = json.dumps(data, ensure_ascii=False).encode()
@@ -3100,6 +3470,9 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed.path == "/news":
                     return self.send_json(stock_news(code))
                 return self.send_json(stock_insight(code, params.get("provider", ["auto"])[0]))
+            if parsed.path == "/analyze":
+                result = analyze_stock(params.get("q", [""])[0], params.get("provider", ["auto"])[0])
+                return self.send_json(result)
             if parsed.path == "/pick-log":
                 label = "".join(ch for ch in params.get("label", ["manual"])[0] if ch.isalnum() or ch in "-_")[:32] or "manual"
                 return self.send_json(write_pick_log(label, params.get("provider", ["auto"])[0],

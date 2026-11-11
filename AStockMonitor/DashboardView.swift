@@ -416,6 +416,7 @@ private struct NativeQuoteTable: NSViewRepresentable {
             let quote = quotes[row]
             let menu = NSMenu()
             addContextItem("查看分时图", action: .openDetail, code: quote.code, to: menu)
+            addContextItem("个股分析", action: .analyze, code: quote.code, to: menu)
             addContextItem(isBlacklisted(quote.code) ? "移出黑名单" : "加入黑名单", action: .toggleBlacklist, code: quote.code, to: menu)
             addContextItem(isInMenuBar(quote.code) ? "从状态栏移除" : "添加到状态栏", action: .toggleMenuBar, code: quote.code, to: menu)
             addContextItem(isInWatchlist(quote.code) ? "从监控自选池移除" : "加入监控自选池", action: .toggleWatchlist, code: quote.code, to: menu)
@@ -458,9 +459,11 @@ private enum QuoteContextAction: Int {
     case toggleBlacklist
     case toggleMenuBar
     case toggleWatchlist
+    case analyze
 
     var logName: String {
         switch self {
+        case .analyze: return "个股分析"
         case .openDetail: return "查看分时图"
         case .toggleBlacklist: return "切换黑名单"
         case .toggleMenuBar: return "切换状态栏股票"
@@ -543,6 +546,7 @@ struct DashboardView: View {
                         switch selectedTab {
                         case 1: alertTable
                         case 2: recommendationTable
+                        case 3: StockAnalysisPage(store: store)
                         default:
                             quoteToolbar
                             Divider()
@@ -609,6 +613,7 @@ struct DashboardView: View {
             Button("") { selectedTab = 0 }.keyboardShortcut("1", modifiers: .command)
             Button("") { selectedTab = 1 }.keyboardShortcut("2", modifiers: .command)
             Button("") { selectedTab = 2 }.keyboardShortcut("3", modifiers: .command)
+            Button("") { selectedTab = 3 }.keyboardShortcut("4", modifiers: .command)
             Button("") { selectedTab = 0; searchFocused = true }.keyboardShortcut("f", modifiers: .command)
             Button("") { store.refresh(); if selectedTab == 2 { store.refreshPotential(force: true) } }.keyboardShortcut("r", modifiers: .command)
             Button("") { withAnimation(.easeInOut(duration: 0.2)) { showSidebar.toggle() } }.keyboardShortcut("l", modifiers: .command)
@@ -659,6 +664,7 @@ struct DashboardView: View {
             tabButton(0, title: "行情", icon: "list.bullet.rectangle", badge: nil)
             tabButton(1, title: "告警", icon: "bell", badge: store.unseenAlertCount > 0 ? min(store.unseenAlertCount, 99) : nil)
             tabButton(2, title: "潜力股", icon: "scope", badge: store.potentialStocks(for: "all").isEmpty ? nil : store.potentialStocks(for: "all").count, badgeColor: .orange)
+            tabButton(3, title: "个股分析", icon: "stethoscope", badge: nil)
         }
         .padding(2)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
@@ -787,6 +793,7 @@ struct DashboardView: View {
                     watchRow(code)
                         .contextMenu {
                             Button("打开个股详情") { openWindow(id: "stock-detail", value: code) }
+                            Button("个股分析") { store.analyze(code); selectedTab = 3 }
                             Button("在行情列表中定位") { focusQuote(code) }
                             Divider()
                             Button(store.watch.blacklist.contains(code) ? "移出黑名单" : "加入黑名单") { store.toggleBlacklist(code) }
@@ -951,6 +958,8 @@ struct DashboardView: View {
                         case .toggleWatchlist:
                             if store.watch.codes.contains(code) { store.removeCode(code) }
                             else { store.addCode(code) }
+                        case .analyze:
+                            store.analyze(code); selectedTab = 3
                         }
                     }
                 )
@@ -1168,6 +1177,7 @@ struct DashboardView: View {
             .simultaneousGesture(TapGesture(count: 2).onEnded { jumpToAlertStock(alert) })
             .contextMenu {
                 Button("打开个股详情") { openWindow(id: "stock-detail", value: alert.code) }
+                Button("个股分析") { store.analyze(alert.code); selectedTab = 3 }
                 Button("在行情列表中定位") { jumpToAlertStock(alert) }
                 Button(store.watch.codes.contains(alert.code) ? "移出自选" : "加入自选") {
                     if store.watch.codes.contains(alert.code) { store.removeCode(alert.code) } else { store.addCode(alert.code) }
@@ -1487,6 +1497,7 @@ struct DashboardView: View {
         .help("单击打开个股详情，右键更多操作")
         .contextMenu {
             Button("打开个股详情") { openWindow(id: "stock-detail", value: stock.code) }
+            Button("个股分析") { store.analyze(stock.code); selectedTab = 3 }
             Button("在行情列表中定位") { focusQuote(stock.code) }
             Button(inWatchlist ? "移出自选" : "加入自选（启用涨幅、涨停、炸板告警）") {
                 if inWatchlist { store.removeCode(stock.code) } else { store.addCode(stock.code) }
@@ -2896,6 +2907,274 @@ private struct FlowLayout: Layout {
             view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
             x += size.width + spacing
             rowHeight = max(rowHeight, size.height)
+        }
+    }
+}
+
+// MARK: - 个股分析
+
+struct StockAnalysisPage: View {
+    @ObservedObject var store: MonitorStore
+    @Environment(\.openWindow) private var openWindow
+    @State private var input = ""
+    @FocusState private var inputFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            searchBar
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if store.analysisLoading && store.analysis == nil {
+                        HStack { ProgressView().controlSize(.small); Text("正在拉取最新行情、日线与资讯并计算…").foregroundStyle(.secondary) }
+                            .frame(maxWidth: .infinity, minHeight: 200)
+                    } else if let error = store.analysisError {
+                        Label("分析失败：\(error)", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                    } else if let result = store.analysis {
+                        if let error = result.error {
+                            candidatesView(error: error, candidates: result.candidates ?? [])
+                        } else {
+                            resultView(result)
+                        }
+                    } else {
+                        emptyState
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: 1100, alignment: .leading)
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .onAppear { if input.isEmpty { input = store.analysisQuery }; inputFocused = store.analysis == nil }
+        .onChange(of: store.analysisQuery) { value in input = value }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("输入股票代码或名称，例如 600519、茅台、新易盛", text: $input)
+                .textFieldStyle(.plain).font(.system(size: 14))
+                .focused($inputFocused)
+                .onSubmit { store.analyze(input) }
+            if store.analysisLoading { ProgressView().controlSize(.small) }
+            Button("分析") { store.analyze(input) }
+                .buttonStyle(.borderedProminent).disabled(input.trimmingCharacters(in: .whitespaces).isEmpty)
+            if let code = store.analysis?.code, store.analysis?.error == nil {
+                Button { store.analyze(code) } label: { Image(systemName: "arrow.clockwise") }.help("用最新行情重新分析")
+            }
+            Divider().frame(height: 18)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(store.analysisHistory, id: \.self) { entry in
+                        Button(entry.split(separator: " ").last.map(String.init) ?? entry) {
+                            let code = String(entry.prefix(6)); input = code; store.analyze(code)
+                        }
+                        .buttonStyle(.plain).font(.caption)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.primary.opacity(0.06)))
+                    }
+                }
+            }.frame(maxWidth: 420)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "stethoscope").font(.system(size: 40)).foregroundStyle(.secondary)
+            Text("个股分析").font(.title3.bold())
+            Text("输入代码或名称，自动拉取最新行情、日线、涨停数据和资讯，给出推荐指数、买卖建议、关键价位和回测概率。也可以在行情、自选、潜力股列表里右键「个股分析」。")
+                .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 520)
+        }
+        .frame(maxWidth: .infinity, minHeight: 320)
+    }
+
+    private func candidatesView(error: String, candidates: [StockAnalysis.Candidate]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(error, systemImage: "questionmark.circle").font(.headline)
+            if !candidates.isEmpty {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], alignment: .leading, spacing: 8) {
+                    ForEach(candidates, id: \.code) { candidate in
+                        Button { input = candidate.code; store.analyze(candidate.code) } label: {
+                            HStack { Text(candidate.name); Text(candidate.code).font(.caption.monospaced()).foregroundStyle(.secondary) }
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+                        }.buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private func toneColor(_ tone: String?) -> Color {
+        switch tone { case "buy": .red; case "watch": .orange; case "reduce": .teal; case "sell": .green; default: .gray }
+    }
+
+    @ViewBuilder private func resultView(_ r: StockAnalysis) -> some View {
+        let color = toneColor(r.tone)
+        let change = r.changePercent ?? 0
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(r.name ?? "").font(.title2.bold())
+                    Text(r.code ?? "").font(.callout.monospaced()).foregroundStyle(.secondary)
+                    if let industry = r.industry { Text(industry).font(.caption).foregroundStyle(.secondary) }
+                    Spacer()
+                    if let code = r.code {
+                        Button("打开详情") { openWindow(id: "stock-detail", value: code) }.controlSize(.small)
+                        Button(store.watch.codes.contains(code) ? "已在自选" : "加入自选") { store.addCode(code) }
+                            .controlSize(.small).disabled(store.watch.codes.contains(code))
+                    }
+                }
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(String(format: "%.2f", r.price ?? 0)).font(.system(size: 28, weight: .semibold, design: .rounded))
+                    Text(String(format: "%+.2f%%", change)).font(.title3.bold())
+                }
+                .monospacedDigit().foregroundStyle(change >= 0 ? Color.red : Color.green)
+                HStack(spacing: 18) {
+                    ZStack {
+                        Circle().stroke(Color.primary.opacity(0.08), lineWidth: 10)
+                        Circle().trim(from: 0, to: CGFloat(r.index ?? 0) / 100)
+                            .stroke(color, style: StrokeStyle(lineWidth: 10, lineCap: .round)).rotationEffect(.degrees(-90))
+                        VStack(spacing: 0) {
+                            Text("\(r.index ?? 0)").font(.system(size: 30, weight: .bold, design: .rounded))
+                            Text("推荐指数").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(width: 110, height: 110)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(r.verdict ?? "—").font(.system(size: 26, weight: .heavy)).foregroundStyle(color)
+                        ForEach(["未持有", "已持有"], id: \.self) { key in
+                            if let advice = r.advice?[key] {
+                                HStack(spacing: 6) {
+                                    Text(key).font(.caption.bold()).foregroundStyle(.white)
+                                        .padding(.horizontal, 6).padding(.vertical, 2)
+                                        .background(Capsule().fill(key == "未持有" ? Color.blue : Color.purple))
+                                    Text(advice).font(.callout)
+                                }
+                            }
+                        }
+                        if let time = r.updatedAt?.split(separator: "T").last {
+                            Text("分析时间 \(String(time.prefix(8)))").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if let levels = r.levels, !levels.isEmpty {
+                    HStack(spacing: 10) {
+                        ForEach(levels, id: \.self) { level in
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(level.label).font(.caption2).foregroundStyle(.secondary)
+                                Text(String(format: "%.2f", level.price)).font(.system(size: 14, weight: .semibold)).monospacedDigit()
+                                    .foregroundStyle(level.label == "止损参考" ? Color.green : (level.label == "支撑" ? Color.primary : Color.red))
+                                if let note = level.note { Text(note).font(.caption2).foregroundStyle(.secondary) }
+                            }
+                            .padding(8).frame(minWidth: 96, alignment: .leading)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("回测概率（括号为全市场平均）").font(.caption.bold()).foregroundStyle(.secondary)
+                ForEach(r.probabilities ?? [], id: \.self) { p in probabilityBar(p) }
+            }
+            .padding(12)
+            .frame(width: 330, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+        }
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("评分构成").font(.headline)
+                ForEach(r.components ?? [], id: \.self) { componentRow($0) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 8) {
+                if let risks = r.risks, !risks.isEmpty {
+                    Text("风险提示").font(.headline)
+                    ForEach(risks, id: \.self) { Label($0, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange) }
+                }
+                if let strategies = r.strategies, !strategies.isEmpty {
+                    Text("入选策略").font(.headline).padding(.top, 4)
+                    ForEach(strategies, id: \.self) { s in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(s.title) · \(s.score) 分（\(s.grade)）").font(.callout.bold())
+                            ForEach(s.signals, id: \.self) { Text("· " + $0).font(.caption).foregroundStyle(.secondary) }
+                        }
+                    }
+                }
+                if let concepts = r.concepts, !concepts.isEmpty {
+                    Text("题材：" + concepts.joined(separator: "、")).font(.caption).foregroundStyle(.secondary).padding(.top, 4)
+                }
+            }
+            .frame(width: 330, alignment: .leading)
+        }
+        if let news = r.news, !news.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("最新资讯").font(.headline)
+                ForEach(news, id: \.self) { item in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(item.time).font(.caption.monospaced()).foregroundStyle(.secondary)
+                        if let url = URL(string: item.url), !item.url.isEmpty {
+                            Link(item.title, destination: url).font(.callout).lineLimit(1)
+                        } else {
+                            Text(item.title).font(.callout).lineLimit(1)
+                        }
+                    }
+                }
+            }
+        }
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(r.notes ?? [], id: \.self) { Text($0).font(.caption2).foregroundStyle(.secondary) }
+        }
+        .padding(.top, 6)
+    }
+
+    private func probabilityBar(_ p: StockAnalysis.Probability) -> some View {
+        let bad = p.label.contains("跌")
+        let elevated = p.value > p.baseline * 1.3
+        let color: Color = bad ? (elevated ? .green : .gray) : (elevated ? .red : .gray)
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(p.label).font(.caption)
+                Spacer()
+                Text(String(format: "%.0f%%", p.value)).font(.callout.bold()).monospacedDigit().foregroundStyle(color)
+                Text(String(format: "（%.0f%%）", p.baseline)).font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.primary.opacity(0.08))
+                    Capsule().fill(color.opacity(0.75)).frame(width: geo.size.width * CGFloat(min(p.value, 100) / 100))
+                    Rectangle().fill(Color.primary.opacity(0.6)).frame(width: 2, height: 10)
+                        .offset(x: geo.size.width * CGFloat(min(p.baseline, 100) / 100) - 1)
+                }
+            }
+            .frame(height: 7)
+            if let note = p.note { Text(note).font(.system(size: 9)).foregroundStyle(.tertiary) }
+        }
+    }
+
+    private func componentRow(_ c: StockAnalysis.Component) -> some View {
+        let penalty = c.max <= 0
+        let fraction = penalty ? 0 : max(0, min(c.score / c.max, 1))
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(c.name).font(.callout.bold())
+                Spacer()
+                Text(penalty ? String(format: "%.0f", c.score) : String(format: "%.0f / %.0f", c.score, c.max))
+                    .font(.callout).monospacedDigit().foregroundStyle(penalty ? Color.green : Color.primary)
+            }
+            if !penalty {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.primary.opacity(0.08))
+                        Capsule().fill(fraction >= 0.7 ? Color.red.opacity(0.7) : (fraction >= 0.4 ? Color.orange.opacity(0.7) : Color.gray.opacity(0.6)))
+                            .frame(width: geo.size.width * CGFloat(fraction))
+                    }
+                }.frame(height: 6)
+            }
+            Text(c.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
 }

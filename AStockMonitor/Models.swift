@@ -82,6 +82,37 @@ struct PotentialStock: Decodable, Identifiable, Hashable {
     var id: String { code }
 }
 
+/// Result of the bridge's /analyze: rule-based recommendation index, advice and backtested probabilities.
+struct StockAnalysis: Decodable {
+    struct Component: Decodable, Hashable { let name: String; let score: Double; let max: Double; let detail: String }
+    struct Probability: Decodable, Hashable { let label: String; let value: Double; let baseline: Double; let note: String? }
+    struct Level: Decodable, Hashable { let label: String; let price: Double; let note: String? }
+    struct Strategy: Decodable, Hashable { let strategy: String; let title: String; let score: Int; let grade: String; let signals: [String] }
+    struct News: Decodable, Hashable { let title: String; let time: String; let url: String }
+    struct Candidate: Decodable, Hashable { let code: String; let name: String }
+    let error: String?
+    let candidates: [Candidate]?
+    let code: String?
+    let name: String?
+    let industry: String?
+    let concepts: [String]?
+    let price: Double?
+    let changePercent: Double?
+    let updatedAt: String?
+    let index: Int?
+    let verdict: String?
+    let tone: String?
+    let advice: [String: String]?
+    let components: [Component]?
+    let probabilities: [Probability]?
+    let levels: [Level]?
+    let signals: [String]?
+    let risks: [String]?
+    let strategies: [Strategy]?
+    let news: [News]?
+    let notes: [String]?
+}
+
 struct DayOHLC: Decodable, Hashable {
     let price: Double?
     let open: Double?
