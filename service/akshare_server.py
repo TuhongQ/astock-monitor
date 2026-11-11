@@ -28,7 +28,7 @@ socket.setdefaulttimeout(10)
 
 HOST, PORT, CACHE_SECONDS = "127.0.0.1", 8767, 1.5
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-API_VERSION = 21
+API_VERSION = 22
 INDEX_SYMBOLS = {
     "sh000001": "上证指数", "sz399001": "深证成指",
     "sz399006": "创业板指", "sh000680": "科创综指",
@@ -3176,10 +3176,10 @@ def analyze_stock(query, provider="auto"):
         intraday -= 2; intra_notes.append("今日炸板"); risks.append("今日冲板失败（炸板），抛压较重")
     component("盘中", intraday, 10, "，".join(intra_notes) or "—")
 
-    # 5. 策略共振（15）
-    best = max((m["score"] for m in matches), default=0)
-    strat = best / 100 * 12 + min(len(matches), 3)
-    component("策略共振", strat, 15, "、".join(f"{m['title']} {m['score']}" for m in matches) or "未入选任何选股策略")
+    # 5. 策略评分（短线核心，与潜力股同一套评分）
+    best_match = max(matches, key=lambda m: m["score"]) if matches else None
+    best = best_match["score"] if best_match else 0
+    component("策略评分", best, 100, "、".join(f"{m['title']} {m['score']}（{m['grade']}）" for m in matches) or "未入选任何选股策略")
 
     # 6. 环境（10）
     env, env_notes = 5.0, []
@@ -3200,51 +3200,92 @@ def analyze_stock(query, provider="auto"):
     if industry and industry in (market.get("strongIndustries") or []):
         env += 2; env_notes.append(f"所属行业「{industry}」领涨")
     component("市场环境", env, 10, "，".join(env_notes) or "—")
+    for c in components:
+        c["group"] = "短线" if c["name"] in ("盘中", "策略评分") else "趋势"
 
-    # 7. 风险扣分（最多 -20）
-    penalty = 0.0
+    # 风险：只有高位、连板过高、ST、趋势破位扣趋势分；波动大是短线策略要找的特征，只提示不扣分
+    trend_penalty = 0.0
     if swing:
         raw = swing["raw"]
         if raw["ret20"] > 50:
-            penalty += 8; risks.append(f"20 日涨幅 {raw['ret20']:.0f}%，高位")
+            trend_penalty += 12; risks.append(f"20 日涨幅 {raw['ret20']:.0f}%，高位")
         if raw["vol10"] > 5:
-            penalty += 4; risks.append(f"近 10 日日波动 {raw['vol10']:.1f}%，波动剧烈")
+            risks.append(f"近 10 日日波动 {raw['vol10']:.1f}%，波动剧烈，仓位宜轻")
         if swing["pDrop"] > 35:
-            penalty += 4; risks.append(f"模型估计 5 日内跌超 5% 的概率 {swing['pDrop']:.0f}%（全市场约 {SWING_BASE_DROP:.0f}%）")
+            risks.append(f"模型估计 5 日内跌超 5% 的概率 {swing['pDrop']:.0f}%（全市场约 {SWING_BASE_DROP:.0f}%）")
         if price < swing["ma"]["MA20"] and price < swing["ma"]["MA60"]:
-            penalty += 3
+            trend_penalty += 5
     streak = (sealed_info or {}).get("streak") or 0
     if streak >= 4:
-        penalty += 5; risks.append(f"{streak} 连板高位，接力风险大")
-    if "ST" in q.get("name", "").upper():
-        penalty += 10; risks.append("ST 股，有退市风险")
-    penalty = min(penalty, 20)
-    if penalty:
-        components.append({"name": "风险扣分", "score": -round(penalty, 1), "max": 0, "detail": "见风险提示"})
+        trend_penalty += 8; risks.append(f"{streak} 连板高位，接力风险大")
+    is_st = "ST" in q.get("name", "").upper()
+    if is_st:
+        trend_penalty += 20; risks.append("ST 股，有退市风险")
+    if trend_penalty:
+        components.append({"name": "风险扣分", "score": -round(trend_penalty, 1), "max": 0, "detail": "高位 / 破位 / 高连板 / ST", "group": "趋势"})
 
-    total = sum(c["score"] for c in components if c["max"] > 0) - penalty
-    index = int(round(max(0, min(total, 100))))
-    above20 = swing is not None and price > swing["ma"]["MA20"]
+    trend_raw = trend + momentum + volume + env
+    trend_index = int(round(max(0, min(trend_raw / 65 * 100 - trend_penalty, 100))))
+
+    # 短线指数：入选策略时直接用潜力股评分（最高分 + 每多一个策略 6 分，与「综合」一致）
+    if matches:
+        short = min(best + 6 * (len(matches) - 1), 100)
+        short_basis = f"{best_match['title']} {best}" + (f" 等 {len(matches)} 个策略" if len(matches) > 1 else "")
+    else:
+        short = 35 + ((p5 * 100 - 12) * 0.8 if p5 is not None else 0) + (intraday - 5) * 2
+        short = min(max(short, 0), 58)
+        short_basis = "未入选策略，按盘中走势与次日冲高概率估算（上限 58）"
+    if mood == "退潮":
+        short -= 5
+    if regime == "弱势":
+        short -= 5
+    if broken_info and not any(m["strategy"] == "limit" for m in matches):
+        short -= 5
+    if is_st:
+        short = min(short, 20)
+    short_index = int(round(max(0, min(short, 100))))
+    index = max(short_index, round(0.65 * short_index + 0.35 * trend_index)) if matches else round(0.35 * short_index + 0.65 * trend_index)
+    index = int(max(0, min(index, 100)))
+
     trend_down = swing is not None and price < swing["ma"]["MA20"] and swing["dif"] < swing["dea"]
-    if index >= 72 and above20 and not sealed_info:
-        verdict, tone = "买入", "buy"
-        holder = "持有，跌破止损位再走"
-    elif index >= 60:
+    top_name = f"{best_match['title']} {best}（{best_match['grade']}）" if best_match else ""
+    if sealed_info:
+        verdict, tone = "已涨停 · 等开板", "watch"
+        buyer, holder = "封板买不进，可排队或等次日开板再看", "持有，封板不动；开板放量再减仓"
+    elif matches and short_index >= 75:
+        if trend_index >= 55:
+            verdict, tone = "买入", "buy"
+            buyer, holder = "可分批买入，设好止损", "持有，跌破止损位再走"
+        else:
+            verdict, tone = "短线买入", "buy"
+            buyer, holder = "短线参与、轻仓，快进快出，跌破止损就走", "短线持有，冲高分批止盈"
+    elif matches and short_index >= 60:
         verdict, tone = "逢低关注", "watch"
-        holder = "持有，冲高可分批止盈"
-    elif index >= 45:
+        buyer, holder = "轻仓或等回踩支撑再买", "持有，冲高分批止盈"
+    elif trend_index >= 70:
+        verdict, tone = "逢低关注", "watch"
+        buyer, holder = "趋势好但没有短线入场信号，等回踩或新的启动", "持有，跌破 20 日线再减"
+    elif trend_index >= 45:
         verdict, tone = "观望", "neutral"
+        buyer = "暂不买入"
         holder = "持有观察，跌破支撑减仓" if not trend_down else "减仓，等待重新站上 20 日线"
-    elif index >= 32:
+    elif trend_index >= 30:
         verdict, tone = "减仓", "reduce"
-        holder = "逢反弹减仓"
+        buyer, holder = "不买入", "逢反弹减仓"
     else:
         verdict, tone = "卖出 / 回避", "sell"
-        holder = "卖出，趋势转弱"
-    if sealed_info and verdict == "买入":
-        verdict = "逢低关注"
-    buyer = {"buy": "可分批买入，设好止损", "watch": "等回踩支撑再考虑", "neutral": "暂不买入",
-             "reduce": "不买入", "sell": "回避"}[tone]
+        buyer, holder = "回避", "卖出，趋势转弱"
+
+    if matches and short_index >= 75 and trend_index < 55:
+        horizon = f"短线信号强（{top_name}），但趋势面偏弱（趋势指数 {trend_index}）：适合 1–3 天短线，不宜长拿。"
+    elif matches and short_index >= 60 and trend_index >= 55:
+        horizon = f"短线（{top_name}）与趋势（{trend_index}）同向，信号较一致。"
+    elif not matches and trend_index >= 70:
+        horizon = "趋势良好，但今天没有进入任何短线策略：适合等回踩或新的启动信号。"
+    elif not matches:
+        horizon = "没有进入任何短线策略，以趋势面为主判断。"
+    else:
+        horizon = f"短线评分 {short_index}（{top_name}），趋势指数 {trend_index}。"
 
     levels = []
     if swing:
@@ -3284,11 +3325,12 @@ def analyze_stock(query, provider="auto"):
     return {
         "code": code, "name": q.get("name", ""), "industry": industry or None, "concepts": concepts[:10],
         "price": price, "changePercent": change, "updatedAt": now.isoformat(timespec="seconds"),
-        "index": index, "verdict": verdict, "tone": tone,
+        "index": index, "shortIndex": short_index, "trendIndex": trend_index, "shortBasis": short_basis,
+        "horizon": horizon, "verdict": verdict, "tone": tone,
         "advice": {"未持有": buyer, "已持有": holder},
         "components": components, "probabilities": probabilities, "levels": levels,
         "signals": signals, "risks": list(dict.fromkeys(risks)), "strategies": matches, "news": news,
-        "notes": ["推荐指数为趋势、动量、量能、盘中、策略、环境六项规则打分减去风险扣分，不是对涨跌的预测。",
+        "notes": ["短线指数与潜力股同一套策略评分（最高分 + 多策略各加 6 分，A ≥ 75）；趋势指数由趋势、动量、量能、环境打分。入选策略时推荐指数以短线为主，否则以趋势为主。都是规则评分，不是对涨跌的预测。",
                   "回测（1490 只个股，2026 年）显示：日线技术指标无法预测 5 日涨跌方向（AUC 0.50），能预测的主要是波动大小；概率栏数字即这类模型的结果，括号内为全市场平均。",
                   "仅供参考，不构成投资建议。"],
     }

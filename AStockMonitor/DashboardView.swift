@@ -3055,6 +3055,11 @@ struct StockAnalysisPage: View {
                                 }
                             }
                         }
+                        HStack(spacing: 6) {
+                            if let short = r.shortIndex { subIndex("短线", short, help: r.shortBasis) }
+                            if let trend = r.trendIndex { subIndex("趋势", trend, help: "趋势、动量、量能、环境打分") }
+                        }
+                        if let code = r.code { poolBadges(code) }
                         if let time = r.updatedAt?.split(separator: "T").last {
                             Text("分析时间 \(String(time.prefix(8)))").font(.caption2).foregroundStyle(.secondary)
                         }
@@ -3084,10 +3089,20 @@ struct StockAnalysisPage: View {
             .frame(width: 330, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
         }
+        if let horizon = r.horizon {
+            Label(horizon, systemImage: "clock.arrow.2.circlepath").font(.callout)
+                .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 8).fill(color.opacity(0.08)))
+        }
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 8) {
-                Text("评分构成").font(.headline)
-                ForEach(r.components ?? [], id: \.self) { componentRow($0) }
+                ForEach(["短线", "趋势"], id: \.self) { group in
+                    let items = (r.components ?? []).filter { ($0.group ?? "趋势") == group }
+                    if !items.isEmpty {
+                        Text(group == "短线" ? "短线评分（与潜力股同一套策略）" : "趋势评分").font(.headline).padding(.top, group == "趋势" ? 6 : 0)
+                        ForEach(items, id: \.self) { componentRow($0) }
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             VStack(alignment: .leading, spacing: 8) {
@@ -3129,6 +3144,33 @@ struct StockAnalysisPage: View {
             ForEach(r.notes ?? [], id: \.self) { Text($0).font(.caption2).foregroundStyle(.secondary) }
         }
         .padding(.top, 6)
+    }
+
+    private func subIndex(_ title: String, _ value: Int, help: String?) -> some View {
+        HStack(spacing: 4) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text("\(value)").font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(value >= 75 ? Color.red : (value >= 60 ? Color.orange : Color.secondary))
+        }
+        .padding(.horizontal, 7).padding(.vertical, 3)
+        .background(Capsule().fill(Color.primary.opacity(0.06)))
+        .help(help ?? "")
+    }
+
+    /// Where this stock sits in the user's own pools today (daily picks / 隔夜).
+    @ViewBuilder private func poolBadges(_ code: String) -> some View {
+        let history = store.pickHistory(for: code).prefix(3)
+        if !history.isEmpty {
+            HStack(spacing: 6) {
+                ForEach(Array(history.enumerated()), id: \.offset) { _, record in
+                    Text((record.pick.isOvernight ? "隔夜池 " : "推荐池 ") + String(record.day.suffix(5))
+                         + (record.pick.isOvernight ? "" : " 荐\(record.pick.initialScore)"))
+                        .font(.caption2.bold()).foregroundStyle(.white)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Capsule().fill(record.pick.isOvernight ? Color.mint : Color.orange))
+                }
+            }
+        }
     }
 
     private func probabilityBar(_ p: StockAnalysis.Probability) -> some View {
