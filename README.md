@@ -4,6 +4,25 @@
 
 主界面提供 31 类行业筛选；概念筛选合并常用标签与实时行情中实际返回的分类，概念列展示全部分类标签，受列宽限制时单行截断；悬停个股概念单元格可查看完整标签，也可横向滚动或拖动列宽。行情工具栏提供独立涨/跌方向筛选。行业选择器与主行情表代码列对齐。四个指数卡片按内容紧凑排列，搜索框位于其后、靠右并独占剩余横向空间。指数快照通过腾讯行情接口获取并共享给详情窗口；详情分时图使用持续轮询的实时快照采样，避免调用日志中持续返回 502 的指数分钟历史接口。申万全市场分类工作簿一次请求即可提供行业映射；概念分类在后台通过东方财富 F10 `RPT_F10_CORETHEME_BOARDTYPE` 分页获取全量个股题材映射，每页最多 5,000 条并按至少 0.9 秒间隔请求；验证覆盖超过 1,000 只股票后才标记缓存完整。冷启动或旧版不完整缓存会立即触发重建，映射随分页逐步显示；完整缓存每 24 小时更新一次，接口失败时保留缓存并在冷却后重试，不阻塞行情轮询。行业概念分类、总市值/流通市值、年度及最近季度盈亏分别保存在 `market-classification.json`、`market-cap-cache.json`、`annual-profit-cache.json`，启动时先读本地缓存，成功更新后原子写入；三类数据各自最多每 24 小时从接口刷新一次。自定义概念标签仍可在个股右键菜单设置。
 
+## iPad 版（`iPad/`，iPadOS 16+）
+
+独立运行，不需要 Mac：直接请求东方财富公开接口（全市场行情约 60 页并发、指数、涨停 / 炸板 / 昨日涨停池、日 K、分时、个股资讯），在 iPad 上本地计算。
+
+- 左侧自选股池（分组、按日期的「推荐 MM-dd 主板 / 创业科创」分组和推荐以来收益），右侧「行情 / 告警 / 潜力股」三页。
+- 选股策略为 Mac 服务端的 Swift 移植：综合、速拉异动、涨停接力、趋势突破、强势回踩、板块龙头（东财行业）、尾盘潜伏；每日自动推荐主板、创业科创各 10 只。
+- 告警：自选股涨幅、全市场速拉、全市场封板 / 炸板 / 回封 / 跌停，顶部横幅提示，日志页汇总涨停情绪、连板梯队和涨停板块。
+- 个股页：分时 / 5 日 / 日 K 图，以及推荐说明、量化数据、最新资讯。
+- 限制：iPadOS 不允许后台持续联网，应用需在前台才会刷新和告警（运行时保持屏幕常亮）；没有 AkShare 的概念题材映射和年度 / 季度财报列。
+
+构建：用 Xcode 打开 `iPad/AStockPad.xcodeproj`，或命令行生成未签名 IPA：
+
+```sh
+xcodebuild -project iPad/AStockPad.xcodeproj -scheme AStockPad -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build/pad build
+mkdir -p Payload && cp -R build/pad/Build/Products/Release-iphoneos/AStockPad.app Payload/ && zip -qry AStockPad-iPad.ipa Payload
+```
+
+IPA 未签名，用 Sideloadly 或 AltStore 以自己的 Apple ID 签名安装；免费 Apple ID 签名 7 天后需重新安装。
+
 ## 编译与运行
 
 环境：macOS 13 或更新版本、Python 3.9+。首次使用前安装 AkShare：

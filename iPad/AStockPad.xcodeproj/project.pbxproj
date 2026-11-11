@@ -1,0 +1,61 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+/* Begin PBXBuildFile section */
+		1A0000000000000000000001 /* PadApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0000000000000000000001 /* PadApp.swift */; };
+		1A0000000000000000000002 /* PadModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0000000000000000000002 /* PadModels.swift */; };
+		1A0000000000000000000003 /* EastmoneyClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0000000000000000000003 /* EastmoneyClient.swift */; };
+		1A0000000000000000000004 /* QuantEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0000000000000000000004 /* QuantEngine.swift */; };
+		1A0000000000000000000005 /* PadStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0000000000000000000005 /* PadStore.swift */; };
+		1A0000000000000000000006 /* ListViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0000000000000000000006 /* ListViews.swift */; };
+		1A0000000000000000000007 /* DetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0000000000000000000007 /* DetailView.swift */; };
+		1A0000000000000000000099 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1B0000000000000000000099 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+/* Begin PBXFileReference section */
+		1B0000000000000000000001 /* PadApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadApp.swift; sourceTree = "<group>"; };
+		1B0000000000000000000002 /* PadModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadModels.swift; sourceTree = "<group>"; };
+		1B0000000000000000000003 /* EastmoneyClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EastmoneyClient.swift; sourceTree = "<group>"; };
+		1B0000000000000000000004 /* QuantEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuantEngine.swift; sourceTree = "<group>"; };
+		1B0000000000000000000005 /* PadStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PadStore.swift; sourceTree = "<group>"; };
+		1B0000000000000000000006 /* ListViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListViews.swift; sourceTree = "<group>"; };
+		1B0000000000000000000007 /* DetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailView.swift; sourceTree = "<group>"; };
+		1B0000000000000000000099 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		1B0000000000000000000098 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		1B0000000000000000000097 /* AStockPad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AStockPad.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+/* Begin PBXGroup section */
+		1C0000000000000000000001 = {isa = PBXGroup; children = (1C0000000000000000000002, 1C0000000000000000000003, ); sourceTree = "<group>"; };
+		1C0000000000000000000002 /* AStockPad */ = {isa = PBXGroup; path = AStockPad; sourceTree = "<group>"; children = (1B0000000000000000000001, 1B0000000000000000000002, 1B0000000000000000000003, 1B0000000000000000000004, 1B0000000000000000000005, 1B0000000000000000000006, 1B0000000000000000000007, 1B0000000000000000000099, 1B0000000000000000000098, ); };
+		1C0000000000000000000003 /* Products */ = {isa = PBXGroup; name = Products; sourceTree = "<group>"; children = (1B0000000000000000000097, ); };
+/* End PBXGroup section */
+/* Begin PBXNativeTarget section */
+		1D0000000000000000000001 /* AStockPad */ = {isa = PBXNativeTarget; buildConfigurationList = 1E0000000000000000000002; buildPhases = (1F0000000000000000000001, 1F0000000000000000000002, 1F0000000000000000000003, ); buildRules = (); dependencies = (); name = AStockPad; productName = AStockPad; productReference = 1B0000000000000000000097; productType = "com.apple.product-type.application"; };
+/* End PBXNativeTarget section */
+/* Begin PBXProject section */
+		1D0000000000000000000002 /* Project object */ = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastUpgradeCheck = 2700; }; buildConfigurationList = 1E0000000000000000000001; compatibilityVersion = "Xcode 14.0"; developmentRegion = zh_CN; hasScannedForEncodings = 0; knownRegions = (en, Base, zh_CN, ); mainGroup = 1C0000000000000000000001; productRefGroup = 1C0000000000000000000003; projectDirPath = ""; projectRoot = ""; targets = (1D0000000000000000000001, ); };
+/* End PBXProject section */
+/* Begin PBXSourcesBuildPhase section */
+		1F0000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (1A0000000000000000000001, 1A0000000000000000000002, 1A0000000000000000000003, 1A0000000000000000000004, 1A0000000000000000000005, 1A0000000000000000000006, 1A0000000000000000000007, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+/* Begin PBXFrameworksBuildPhase section */
+		1F0000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+/* Begin PBXResourcesBuildPhase section */
+		1F0000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (1A0000000000000000000099, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+/* Begin XCBuildConfiguration section */
+		1E0000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGNING_ALLOWED = NO; CODE_SIGNING_REQUIRED = NO; CODE_SIGN_IDENTITY = ""; INFOPLIST_FILE = AStockPad/Info.plist; GENERATE_INFOPLIST_FILE = NO; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; IPHONEOS_DEPLOYMENT_TARGET = 16.0; TARGETED_DEVICE_FAMILY = 2; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; PRODUCT_BUNDLE_IDENTIFIER = com.tuhongq.astockpad; PRODUCT_NAME = AStockPad; SWIFT_VERSION = 5.0; OTHER_SWIFT_FLAGS = "$(inherited) -disable-sandbox"; ENABLE_PREVIEWS = NO; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; DEBUG_INFORMATION_FORMAT = dwarf; }; name = Debug; };
+		1E0000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGNING_ALLOWED = NO; CODE_SIGNING_REQUIRED = NO; CODE_SIGN_IDENTITY = ""; INFOPLIST_FILE = AStockPad/Info.plist; GENERATE_INFOPLIST_FILE = NO; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; IPHONEOS_DEPLOYMENT_TARGET = 16.0; TARGETED_DEVICE_FAMILY = 2; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; PRODUCT_BUNDLE_IDENTIFIER = com.tuhongq.astockpad; PRODUCT_NAME = AStockPad; SWIFT_VERSION = 5.0; OTHER_SWIFT_FLAGS = "$(inherited) -disable-sandbox"; ENABLE_PREVIEWS = NO; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; }; name = Release; };
+		1E0000000000000000000005 /* Project Debug */ = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 16.0; SWIFT_VERSION = 5.0; }; name = Debug; };
+		1E0000000000000000000006 /* Project Release */ = {isa = XCBuildConfiguration; buildSettings = {SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 16.0; SWIFT_VERSION = 5.0; }; name = Release; };
+/* End XCBuildConfiguration section */
+/* Begin XCConfigurationList section */
+		1E0000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (1E0000000000000000000005, 1E0000000000000000000006, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		1E0000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (1E0000000000000000000003, 1E0000000000000000000004, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = 1D0000000000000000000002;
+}
