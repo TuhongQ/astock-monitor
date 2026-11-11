@@ -90,6 +90,30 @@ struct StockAnalysis: Decodable {
     struct Strategy: Decodable, Hashable { let strategy: String; let title: String; let score: Int; let grade: String; let signals: [String] }
     struct News: Decodable, Hashable { let title: String; let time: String; let url: String }
     struct Candidate: Decodable, Hashable { let code: String; let name: String }
+    struct FlowToday: Decodable, Hashable {
+        let main: Double?; let mainIn: Double?; let mainOut: Double?; let superLarge: Double?; let large: Double?
+        let medium: Double?; let small: Double?; let mainRatio: Double?; let retail: Double?
+    }
+    struct FlowMinute: Decodable, Hashable { let t: String; let main: Double?; let small: Double?; let medium: Double?; let large: Double?; let superLarge: Double? }
+    struct FlowDay: Decodable, Hashable {
+        let date: String; let main: Double?; let small: Double?; let medium: Double?; let large: Double?; let superLarge: Double?
+        let mainRatio: Double?; let close: Double?; let change: Double?
+    }
+    struct Flow: Decodable, Hashable { let today: FlowToday?; let minutes: [FlowMinute]; let days: [FlowDay] }
+    struct IntradayPoint: Decodable, Hashable { let t: String; let price: Double?; let avg: Double? }
+    struct Intraday: Decodable, Hashable { let preClose: Double?; let points: [IntradayPoint] }
+    struct DailyBar: Decodable, Hashable { let date: String; let open: Double; let high: Double; let low: Double; let close: Double; let amount: Double }
+    struct BookLevel: Decodable, Hashable { let price: Double?; let volume: Double? }
+    struct OrderBook: Decodable, Hashable {
+        let bids: [BookLevel]; let asks: [BookLevel]; let outer: Double?; let inner: Double?; let orderRatio: Double?; let orderDiff: Double?
+    }
+    struct StatItem: Decodable, Hashable { let label: String; let value: String; let tone: String; let hint: String? }
+    struct StatGroup: Decodable, Hashable { let title: String; let items: [StatItem] }
+    let flow: Flow?
+    let intraday: Intraday?
+    let daily: [DailyBar]?
+    let orderBook: OrderBook?
+    let stats: [StatGroup]?
     let error: String?
     let candidates: [Candidate]?
     let code: String?

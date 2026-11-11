@@ -3094,6 +3094,18 @@ struct StockAnalysisPage: View {
                 .padding(10).frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 8).fill(color.opacity(0.08)))
         }
+        if !(r.daily ?? []).isEmpty || !(r.intraday?.points ?? []).isEmpty {
+            AnalysisChartPanel(result: r).padding(12)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.03)))
+        }
+        if let flow = r.flow, flow.today != nil || !flow.days.isEmpty {
+            AnalysisFlowPanel(flow: flow).padding(12)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.03)))
+        }
+        if let stats = r.stats, !stats.isEmpty {
+            AnalysisStatsPanel(stats: stats, book: r.orderBook).padding(12)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.03)))
+        }
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(["短线", "趋势"], id: \.self) { group in
@@ -3217,6 +3229,314 @@ struct StockAnalysisPage: View {
                 }.frame(height: 6)
             }
             Text(c.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+// MARK: - 个股分析：走势图、资金流、指标、盘口
+
+private func analysisYuan(_ value: Double?) -> String {
+    guard let value else { return "—" }
+    let magnitude = abs(value)
+    let text = magnitude >= 1e8 ? String(format: "%.2f亿", magnitude / 1e8) : (magnitude >= 1e4 ? String(format: "%.0f万", magnitude / 1e4) : String(format: "%.0f", magnitude))
+    return (value < 0 ? "-" : (value > 0 ? "+" : "")) + text
+}
+
+struct AnalysisChartPanel: View {
+    let result: StockAnalysis
+    @AppStorage("analysis.chartMode") private var mode = "daily"
+    @AppStorage("analysis.showLevels") private var showLevels = true
+
+    private struct Bar: Identifiable { let id: Int; let bar: StockAnalysis.DailyBar }
+    private struct MAPoint: Identifiable { let id: String; let index: Int; let value: Double; let series: String }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("量化走势").font(.headline)
+                Picker("", selection: $mode) { Text("日 K").tag("daily"); Text("分时").tag("intraday") }
+                    .pickerStyle(.segmented).frame(width: 140).labelsHidden()
+                if mode == "daily" {
+                    Toggle("关键价位", isOn: $showLevels).toggleStyle(.checkbox).font(.caption)
+                    HStack(spacing: 8) {
+                        ForEach([("MA5", Color.orange), ("MA10", Color.purple), ("MA20", Color.blue), ("MA60", Color.teal)], id: \.0) { name, color in
+                            HStack(spacing: 3) { Capsule().fill(color).frame(width: 12, height: 3); Text(name).font(.caption2).foregroundStyle(.secondary) }
+                        }
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        HStack(spacing: 3) { Capsule().fill(Color.blue).frame(width: 12, height: 3); Text("价格").font(.caption2).foregroundStyle(.secondary) }
+                        HStack(spacing: 3) { Capsule().fill(Color.orange).frame(width: 12, height: 3); Text("均价").font(.caption2).foregroundStyle(.secondary) }
+                    }
+                }
+                Spacer()
+            }
+            if mode == "daily" { dailyChart } else { intradayChart }
+        }
+    }
+
+    private var bars: [Bar] { (result.daily ?? []).suffix(90).enumerated().map { Bar(id: $0.offset, bar: $0.element) } }
+
+    private var maPoints: [MAPoint] {
+        let all = result.daily ?? []
+        let offset = max(all.count - 90, 0)
+        var points: [MAPoint] = []
+        for (name, n) in [("MA5", 5), ("MA10", 10), ("MA20", 20), ("MA60", 60)] {
+            for i in offset..<all.count where i + 1 >= n {
+                let window = all[(i + 1 - n)...i]
+                points.append(MAPoint(id: "\(name)-\(i)", index: i - offset, value: window.map(\.close).reduce(0, +) / Double(n), series: name))
+            }
+        }
+        return points
+    }
+
+    @ViewBuilder private var dailyChart: some View {
+        let data = bars
+        if data.isEmpty {
+            Text("暂无日线数据").font(.caption).foregroundStyle(.secondary).frame(height: 260)
+        } else {
+            let lows = data.map(\.bar.low), highs = data.map(\.bar.high)
+            let levels = showLevels ? (result.levels ?? []).filter { $0.label != "目标参考" } : []
+            let lo = min(lows.min() ?? 0, levels.map(\.price).min() ?? .infinity) * 0.98
+            let hi = max(highs.max() ?? 1, levels.map(\.price).max() ?? 0) * 1.02
+            let maxAmount = data.map(\.bar.amount).max() ?? 1
+            VStack(spacing: 2) {
+                Chart {
+                    ForEach(data) { item in
+                        let up = item.bar.close >= item.bar.open
+                        RuleMark(x: .value("日", item.id), yStart: .value("低", item.bar.low), yEnd: .value("高", item.bar.high))
+                            .foregroundStyle(up ? Color.red : Color.green).lineStyle(StrokeStyle(lineWidth: 1))
+                        RectangleMark(xStart: .value("起", Double(item.id) - 0.35), xEnd: .value("止", Double(item.id) + 0.35),
+                                      yStart: .value("开", min(item.bar.open, item.bar.close)), yEnd: .value("收", max(item.bar.open, item.bar.close) + 0.0001))
+                            .foregroundStyle(up ? Color.red : Color.green)
+                    }
+                    ForEach(maPoints) { p in
+                        LineMark(x: .value("日", p.index), y: .value("均线", p.value), series: .value("线", p.series))
+                            .foregroundStyle(by: .value("线", p.series)).lineStyle(StrokeStyle(lineWidth: 1.2))
+                    }
+                    ForEach(levels, id: \.self) { level in
+                        RuleMark(y: .value(level.label, level.price))
+                            .foregroundStyle(level.label == "止损参考" ? Color.green.opacity(0.7) : (level.label == "支撑" ? Color.gray : Color.red.opacity(0.7)))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                            .annotation(position: .top, alignment: .leading) {
+                                Text("\(level.label) \(String(format: "%.2f", level.price))").font(.system(size: 9)).foregroundStyle(.secondary)
+                            }
+                    }
+                }
+                .chartForegroundStyleScale(["MA5": Color.orange, "MA10": Color.purple, "MA20": Color.blue, "MA60": Color.teal])
+                .chartLegend(.hidden)
+                .chartYScale(domain: lo...hi)
+                .chartXScale(domain: -1...Double(data.count))
+                .chartXAxis {
+                    AxisMarks(values: stride(from: 0, to: data.count, by: max(data.count / 6, 1)).map { $0 }) { value in
+                        AxisGridLine()
+                        AxisValueLabel { if let i = value.as(Int.self), data.indices.contains(i) { Text(String(data[i].bar.date.suffix(5))).font(.caption2) } }
+                    }
+                }
+                .frame(height: 240)
+                Chart(data) { item in
+                    BarMark(x: .value("日", item.id), y: .value("成交额", item.bar.amount / 1e8))
+                        .foregroundStyle(item.bar.close >= item.bar.open ? Color.red.opacity(0.55) : Color.green.opacity(0.55))
+                }
+                .chartXScale(domain: -1...Double(data.count))
+                .chartXAxis(.hidden)
+                .chartYAxis { AxisMarks(position: .trailing, values: [0, maxAmount / 1e8]) { AxisValueLabel { Text("") } } }
+                .frame(height: 50)
+                Text("下方为成交额（亿），近 90 个交易日，前复权").font(.system(size: 9)).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    @ViewBuilder private var intradayChart: some View {
+        let points = (result.intraday?.points ?? []).enumerated().compactMap { i, p -> (Int, StockAnalysis.IntradayPoint)? in p.price == nil ? nil : (i, p) }
+        if points.isEmpty {
+            Text("暂无分时数据").font(.caption).foregroundStyle(.secondary).frame(height: 260)
+        } else {
+            let pre = result.intraday?.preClose
+            let prices = points.compactMap(\.1.price) + points.compactMap(\.1.avg) + [pre].compactMap { $0 }
+            let lo = (prices.min() ?? 0) * 0.995, hi = (prices.max() ?? 1) * 1.005
+            Chart {
+                ForEach(points, id: \.0) { i, p in
+                    if let price = p.price {
+                        LineMark(x: .value("时", i), y: .value("价", price), series: .value("线", "价格")).foregroundStyle(Color.blue)
+                        AreaMark(x: .value("时", i), yStart: .value("底", lo), yEnd: .value("价", price))
+                            .foregroundStyle(LinearGradient(colors: [Color.blue.opacity(0.18), .clear], startPoint: .top, endPoint: .bottom))
+                    }
+                    if let avg = p.avg {
+                        LineMark(x: .value("时", i), y: .value("均价", avg), series: .value("线", "均价")).foregroundStyle(Color.orange)
+                    }
+                }
+                if let pre {
+                    RuleMark(y: .value("昨收", pre)).foregroundStyle(Color.gray.opacity(0.6)).lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                        .annotation(position: .top, alignment: .trailing) { Text("昨收 \(String(format: "%.2f", pre))").font(.system(size: 9)).foregroundStyle(.secondary) }
+                }
+            }
+            .chartYScale(domain: lo...hi)
+            .chartXScale(domain: 0...240)
+            .chartXAxis {
+                AxisMarks(values: [0, 60, 120, 180, 240]) { value in
+                    AxisGridLine()
+                    AxisValueLabel { Text(["09:30", "10:30", "11:30/13:00", "14:00", "15:00"][(value.as(Int.self) ?? 0) / 60]).font(.caption2) }
+                }
+            }
+            .frame(height: 290)
+        }
+    }
+}
+
+struct AnalysisFlowPanel: View {
+    let flow: StockAnalysis.Flow
+
+    private struct Line: Identifiable { let id: String; let index: Int; let value: Double; let series: String }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("资金流向").font(.headline)
+                Text("东方财富口径：超大单 ≥ 100 万元，大单 20–100 万，中单 4–20 万，小单 < 4 万；主力 = 超大单 + 大单，散户 = 中单 + 小单")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if let today = flow.today {
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 14) {
+                            big("主力净流入", today.main, sub: today.mainRatio.map { String(format: "占成交额 %+.1f%%", $0) })
+                            big("散户净流入", today.retail, sub: "中单 + 小单")
+                        }
+                        breakdown(today)
+                        if let inflow = today.mainIn, let outflow = today.mainOut {
+                            Text("主力流入 \(analysisYuan(inflow).replacingOccurrences(of: "+", with: "")) · 流出 \(analysisYuan(outflow).replacingOccurrences(of: "+", with: ""))")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(width: 300, alignment: .leading)
+                    minuteChart.frame(maxWidth: .infinity)
+                }
+            } else {
+                Text("暂无今日资金流数据").font(.caption).foregroundStyle(.secondary)
+            }
+            if !flow.days.isEmpty { dayChart }
+        }
+    }
+
+    private func big(_ title: String, _ value: Double?, sub: String?) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(analysisYuan(value)).font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundStyle((value ?? 0) >= 0 ? Color.red : Color.green)
+            if let sub { Text(sub).font(.caption2).foregroundStyle(.secondary) }
+        }
+    }
+
+    private func breakdown(_ t: StockAnalysis.FlowToday) -> some View {
+        let rows: [(String, Double?)] = [("超大单", t.superLarge), ("大单", t.large), ("中单", t.medium), ("小单", t.small)]
+        let scale = max(rows.compactMap { $0.1.map(abs) }.max() ?? 1, 1)
+        return VStack(spacing: 4) {
+            ForEach(rows, id: \.0) { name, value in
+                HStack(spacing: 6) {
+                    Text(name).font(.caption).frame(width: 40, alignment: .leading)
+                    GeometryReader { geo in
+                        let half = geo.size.width / 2
+                        let width = half * CGFloat(abs(value ?? 0) / scale)
+                        ZStack(alignment: .leading) {
+                            Rectangle().fill(Color.primary.opacity(0.06))
+                            Rectangle().fill((value ?? 0) >= 0 ? Color.red.opacity(0.7) : Color.green.opacity(0.7))
+                                .frame(width: width)
+                                .offset(x: (value ?? 0) >= 0 ? half : half - width)
+                            Rectangle().fill(Color.primary.opacity(0.3)).frame(width: 1).offset(x: half)
+                        }
+                    }.frame(height: 10)
+                    Text(analysisYuan(value)).font(.caption.monospacedDigit()).frame(width: 72, alignment: .trailing)
+                        .foregroundStyle((value ?? 0) >= 0 ? Color.red : Color.green)
+                }
+            }
+        }
+    }
+
+    private var minuteChart: some View {
+        var lines: [Line] = []
+        for (i, m) in flow.minutes.enumerated() {
+            if let main = m.main { lines.append(Line(id: "m\(i)", index: i, value: main / 1e4, series: "主力")) }
+            let retail = (m.medium ?? 0) + (m.small ?? 0)
+            lines.append(Line(id: "r\(i)", index: i, value: retail / 1e4, series: "散户"))
+            if let s = m.superLarge { lines.append(Line(id: "s\(i)", index: i, value: s / 1e4, series: "超大单")) }
+        }
+        return VStack(alignment: .leading, spacing: 2) {
+            Chart(lines) { line in
+                LineMark(x: .value("时", line.index), y: .value("万元", line.value), series: .value("类", line.series))
+                    .foregroundStyle(by: .value("类", line.series)).lineStyle(StrokeStyle(lineWidth: line.series == "超大单" ? 1 : 1.6))
+                RuleMark(y: .value("零", 0)).foregroundStyle(Color.gray.opacity(0.4))
+            }
+            .chartForegroundStyleScale(["主力": Color.red, "散户": Color.green, "超大单": Color.orange])
+            .chartXScale(domain: 0...240)
+            .chartXAxis {
+                AxisMarks(values: [0, 60, 120, 180, 240]) { value in
+                    AxisGridLine()
+                    AxisValueLabel { Text(["09:30", "10:30", "13:00", "14:00", "15:00"][(value.as(Int.self) ?? 0) / 60]).font(.caption2) }
+                }
+            }
+            .chartYAxisLabel("万元")
+            .frame(height: 170)
+            Text("当日分时累计净流入").font(.system(size: 9)).foregroundStyle(.tertiary)
+        }
+    }
+
+    private var dayChart: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("近 \(flow.days.count) 日主力净流入（万元）").font(.caption.bold()).foregroundStyle(.secondary)
+            Chart(Array(flow.days.enumerated()), id: \.offset) { i, day in
+                BarMark(x: .value("日", String(day.date.suffix(5))), y: .value("主力", (day.main ?? 0) / 1e4))
+                    .foregroundStyle((day.main ?? 0) >= 0 ? Color.red.opacity(0.75) : Color.green.opacity(0.75))
+                    .annotation(position: (day.main ?? 0) >= 0 ? .top : .bottom) {
+                        if i >= flow.days.count - 5 { Text(analysisYuan(day.main)).font(.system(size: 8)).foregroundStyle(.secondary) }
+                    }
+            }
+            .chartXAxis { AxisMarks { _ in AxisValueLabel().font(.system(size: 8)) } }
+            .frame(height: 130)
+        }
+    }
+}
+
+struct AnalysisStatsPanel: View {
+    let stats: [StockAnalysis.StatGroup]
+    let book: StockAnalysis.OrderBook?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            ForEach(stats, id: \.self) { group in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(group.title).font(.headline)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], alignment: .leading, spacing: 8) {
+                        ForEach(group.items, id: \.self) { item in
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(item.label).font(.caption2).foregroundStyle(.secondary)
+                                Text(item.value).font(.system(size: 13, weight: .semibold)).monospacedDigit()
+                                    .foregroundStyle(item.tone == "up" ? Color.red : (item.tone == "down" ? Color.green : Color.primary))
+                            }
+                            .help(item.hint ?? "")
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let book, !(book.bids.isEmpty && book.asks.isEmpty) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("五档盘口").font(.headline)
+                    ForEach(Array(book.asks.enumerated().reversed()), id: \.offset) { i, level in levelRow("卖\(i + 1)", level, .green) }
+                    Divider()
+                    ForEach(Array(book.bids.enumerated()), id: \.offset) { i, level in levelRow("买\(i + 1)", level, .red) }
+                }
+                .frame(width: 170, alignment: .leading)
+            }
+        }
+    }
+
+    private func levelRow(_ name: String, _ level: StockAnalysis.BookLevel, _ color: Color) -> some View {
+        HStack {
+            Text(name).font(.caption).foregroundStyle(.secondary).frame(width: 30, alignment: .leading)
+            Text(level.price.map { String(format: "%.2f", $0) } ?? "—").font(.caption.monospacedDigit()).foregroundStyle(color)
+            Spacer()
+            Text(level.volume.map { String(format: "%.0f", $0) } ?? "—").font(.caption.monospacedDigit())
         }
     }
 }

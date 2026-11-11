@@ -28,7 +28,7 @@ socket.setdefaulttimeout(10)
 
 HOST, PORT, CACHE_SECONDS = "127.0.0.1", 8767, 1.5
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-API_VERSION = 22
+API_VERSION = 23
 INDEX_SYMBOLS = {
     "sh000001": "上证指数", "sz399001": "深证成指",
     "sz399006": "创业板指", "sh000680": "科创综指",
@@ -3025,6 +3025,125 @@ def _swing_probabilities(q, history, now):
             "high20": max(highs[-21:-1]), "high60": max(highs[-61:-1]), "low20": min(lows[-21:-1]),
             "amountRatio": today_amount / avg5 if avg5 > 0 else None}
 
+def _em_secid(code):
+    return ("1." if code.startswith(("6", "9")) and not code.startswith("92") else "0.") + code
+
+def _em_get(url, timeout=6):
+    session = _fast_session()
+    response = session.get(url, timeout=timeout)
+    return (response.json() or {}).get("data") or {}
+
+def analysis_extras(code, history):
+    """Quote stats, fund flow (main / retail), intraday curve, daily bars and order book for 个股分析."""
+    secid = _em_secid(code)
+    quote_fields = ("f43,f44,f45,f46,f47,f48,f49,f50,f55,f60,f84,f85,f92,f105,f116,f117,f135,f136,f137,f138,f139,f140,"
+                    "f141,f142,f143,f144,f145,f146,f147,f148,f149,f161,f162,f163,f164,f167,f168,f170,f171,f173,f186,f187,"
+                    "f188,f191,f192,f11,f12,f13,f14,f15,f16,f17,f18,f19,f20,f31,f32,f33,f34,f35,f36,f37,f38,f39,f40")
+    jobs = {
+        "quote": f"https://push2.eastmoney.com/api/qt/stock/get?secid={secid}&fltt=2&invt=2&fields={quote_fields}",
+        "minuteFlow": f"https://push2.eastmoney.com/api/qt/stock/fflow/kline/get?lmt=0&klt=1&secid={secid}&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56",
+        "dayFlow": f"https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=20&klt=101&secid={secid}&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63",
+        "trends": f"https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid={secid}&fields1=f1,f2,f8&fields2=f51,f53,f58&ndays=1&iscr=0",
+    }
+    results = {}
+    futures = {name: fast_executor.submit(_em_get, url) for name, url in jobs.items()}
+    for name, future in futures.items():
+        try:
+            results[name] = future.result(timeout=10)
+        except Exception as exc:
+            print(f"Analysis extra {name} failed for {code}: {exc}", flush=True)
+            results[name] = {}
+
+    def num(value):
+        try:
+            parsed = float(value)
+            return parsed if math.isfinite(parsed) else None
+        except (TypeError, ValueError):
+            return None
+    q = results["quote"]
+    out = {}
+
+    # 资金流向（东方财富口径：超大单 ≥ 100 万元或 50 万股，大单 20–100 万，中单 4–20 万，小单 < 4 万）
+    main = num(q.get("f137"))
+    flow_today = None
+    if main is not None:
+        amount = num(q.get("f48")) or 0
+        flow_today = {"main": main, "mainIn": num(q.get("f135")), "mainOut": num(q.get("f136")),
+                      "superLarge": num(q.get("f140")), "large": num(q.get("f143")), "medium": num(q.get("f146")),
+                      "small": num(q.get("f149")), "mainRatio": main / amount * 100 if amount else None,
+                      "retail": (num(q.get("f146")) or 0) + (num(q.get("f149")) or 0)}
+    minutes = []
+    for line in (results["minuteFlow"].get("klines") or []):
+        f = line.split(",")
+        if len(f) >= 6:
+            minutes.append({"t": f[0][-5:], "main": num(f[1]), "small": num(f[2]), "medium": num(f[3]),
+                            "large": num(f[4]), "superLarge": num(f[5])})
+    days = []
+    for line in (results["dayFlow"].get("klines") or []):
+        f = line.split(",")
+        if len(f) >= 13:
+            days.append({"date": f[0], "main": num(f[1]), "small": num(f[2]), "medium": num(f[3]), "large": num(f[4]),
+                         "superLarge": num(f[5]), "mainRatio": num(f[6]), "close": num(f[11]), "change": num(f[12])})
+    out["flow"] = {"today": flow_today, "minutes": minutes, "days": days}
+
+    # 分时（价格 + 均价）
+    trends = results["trends"]
+    points = []
+    for line in (trends.get("trends") or []):
+        f = line.split(",")
+        if len(f) >= 3:
+            points.append({"t": f[0][-5:], "price": num(f[1]), "avg": num(f[2])})
+    out["intraday"] = {"preClose": num(trends.get("preClose")), "points": points}
+
+    # 日 K（近 120 根，前复权）
+    out["daily"] = [{"date": b["date"], "open": b["open"], "high": b["high"], "low": b["low"], "close": b["close"],
+                     "amount": b.get("amount", 0)} for b in (history or [])[-120:]]
+
+    # 五档盘口（收盘后为空）
+    bids = [(q.get(p), q.get(v)) for p, v in (("f19", "f20"), ("f17", "f18"), ("f15", "f16"), ("f13", "f14"), ("f11", "f12"))]
+    asks = [(q.get(p), q.get(v)) for p, v in (("f39", "f40"), ("f37", "f38"), ("f35", "f36"), ("f33", "f34"), ("f31", "f32"))]
+    book = {"bids": [{"price": num(p), "volume": num(v)} for p, v in bids if num(p)],
+            "asks": [{"price": num(p), "volume": num(v)} for p, v in asks if num(p)],
+            "outer": num(q.get("f49")), "inner": num(q.get("f161")),
+            "orderRatio": num(q.get("f191")), "orderDiff": num(q.get("f192"))}
+    out["orderBook"] = book
+
+    # 指标表
+    def item(label, value, tone="neutral", hint=None):
+        entry = {"label": label, "value": value, "tone": tone}
+        if hint:
+            entry["hint"] = hint
+        return entry
+    def pct(value, digits=2, signed=False):
+        return "—" if value is None else (f"{value:+.{digits}f}%" if signed else f"{value:.{digits}f}%")
+    def plain(value, digits=2):
+        return "—" if value is None else f"{value:.{digits}f}"
+    outer, inner = book["outer"], book["inner"]
+    turnover = num(q.get("f168"))
+    stats = []
+    if q:
+        stats.append({"title": "交易", "items": [
+            item("换手率", pct(turnover), "up" if (turnover or 0) >= 5 else "neutral", "成交股数 / 流通股本"),
+            item("量比", plain(num(q.get("f50"))), _tone(num(q.get("f50")), 1.5), "当前每分钟成交量 / 过去 5 日同时段均值"),
+            item("振幅", pct(num(q.get("f171")))),
+            item("成交额", _fmt_yuan(num(q.get("f48")))),
+            item("外盘 / 内盘", f"{_fmt_yuan((outer or 0) * 100 * (num(q.get('f43')) or 0))} / {_fmt_yuan((inner or 0) * 100 * (num(q.get('f43')) or 0))}"
+                 if outer is not None and inner is not None else "—",
+                 _tone((outer or 0) - (inner or 0)), "主动买入 / 主动卖出（按手数折算金额）"),
+            item("委比", pct(book["orderRatio"], 1, True), _tone(book["orderRatio"]), "（委买 − 委卖）/（委买 + 委卖）"),
+        ]})
+        stats.append({"title": "估值与财务", "items": [
+            item("市盈率（动）", plain(num(q.get("f162")))), item("市盈率（TTM）", plain(num(q.get("f164")))),
+            item("市净率", plain(num(q.get("f167")))),
+            item("总市值", _fmt_yuan(num(q.get("f116")))), item("流通市值", _fmt_yuan(num(q.get("f117")))),
+            item("每股收益", plain(num(q.get("f55")), 3)), item("每股净资产", plain(num(q.get("f92")))),
+            item("ROE", pct(num(q.get("f173")))), item("毛利率", pct(num(q.get("f186")))),
+            item("净利率", pct(num(q.get("f187")))), item("负债率", pct(num(q.get("f188")))),
+            item("净利润", _fmt_yuan(num(q.get("f105")))),
+        ]})
+    out["stats"] = stats
+    return out
+
 def resolve_stock(query, provider="auto"):
     query = (query or "").strip()
     rows = _market_rows(provider)
@@ -3061,6 +3180,7 @@ def analyze_stock(query, provider="auto"):
         except Exception as exc:
             print(f"Analyze daily fetch failed for {code}: {exc}", flush=True)
             history = None
+    extras_future = fast_executor.submit(analysis_extras, code, history)
     swing = _swing_probabilities(q, history, now) if history else None
     features = daily_features(q, history, now) if history else None
     payload = potential_payload(provider)
@@ -3316,6 +3436,23 @@ def analyze_stock(query, provider="auto"):
     for c in components:
         if c["max"] and c["score"] >= c["max"] * 0.7:
             signals.append(f"{c['name']}：{c['detail']}")
+    try:
+        extras = extras_future.result(timeout=15)
+    except Exception as exc:
+        print(f"Analysis extras failed for {code}: {exc}", flush=True)
+        extras = {}
+    flow_today = (extras.get("flow") or {}).get("today")
+    if flow_today and flow_today.get("main") is not None:
+        main = flow_today["main"]
+        ratio_text = f"（占成交额 {flow_today['mainRatio']:+.1f}%）" if flow_today.get("mainRatio") is not None else ""
+        if main > 0:
+            signals.append(f"主力今日净流入 {_fmt_yuan(main)}{ratio_text}")
+        elif main < 0:
+            risks.append(f"主力今日净流出 {_fmt_yuan(-main)}{ratio_text}，散户在接盘" if (flow_today.get("retail") or 0) > 0 else f"主力今日净流出 {_fmt_yuan(-main)}{ratio_text}")
+    days_flow = (extras.get("flow") or {}).get("days") or []
+    if len(days_flow) >= 5:
+        recent = sum(d.get("main") or 0 for d in days_flow[-5:])
+        (signals if recent > 0 else risks).append(f"近 5 日主力累计净{'流入' if recent > 0 else '流出'} {_fmt_yuan(abs(recent))}")
     news = []
     try:
         news = [{"title": n["title"], "time": n["time"], "url": n["url"]} for n in stock_news(code)[:5]]
@@ -3330,6 +3467,7 @@ def analyze_stock(query, provider="auto"):
         "advice": {"未持有": buyer, "已持有": holder},
         "components": components, "probabilities": probabilities, "levels": levels,
         "signals": signals, "risks": list(dict.fromkeys(risks)), "strategies": matches, "news": news,
+        **extras,
         "notes": ["短线指数与潜力股同一套策略评分（最高分 + 多策略各加 6 分，A ≥ 75）；趋势指数由趋势、动量、量能、环境打分。入选策略时推荐指数以短线为主，否则以趋势为主。都是规则评分，不是对涨跌的预测。",
                   "回测（1490 只个股，2026 年）显示：日线技术指标无法预测 5 日涨跌方向（AUC 0.50），能预测的主要是波动大小；概率栏数字即这类模型的结果，括号内为全市场平均。",
                   "仅供参考，不构成投资建议。"],
