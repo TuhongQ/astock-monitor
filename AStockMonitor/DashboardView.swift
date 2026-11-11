@@ -2283,10 +2283,10 @@ struct SettingsView: View {
                             settingToggle("全市场涨停弹窗", detail: "关闭时非自选股只写入日志、不弹窗", isOn: $draft.limitToastAll)
                         }
                         settingToggle("跌停提醒", detail: "记录封跌停事件，自选股弹窗", isOn: $draft.limitDownAlerts)
-                        settingToggle("每日自动推荐", detail: "综合 A 级、未涨停可买入，按日期建分组「推荐 MM-dd」", isOn: $draft.autoAddDailyPicks)
+                        settingToggle("每日自动推荐", detail: "综合 A 级、未涨停可买入，按日期和板块建分组「推荐 MM-dd 主板 / 创业科创」", isOn: $draft.autoAddDailyPicks)
                         if draft.autoAddDailyPicks {
                             HStack {
-                                settingLabel("每日推荐数量", detail: "满额后更高分（至少 +3）替换最低分")
+                                settingLabel("每板块每日推荐", detail: "主板、创业科创各自计数；满额后更高分（至少 +3）替换最低分")
                                 Spacer()
                                 Stepper("\(draft.dailyPickLimit) 只", value: $draft.dailyPickLimit, in: 3...30)
                             }

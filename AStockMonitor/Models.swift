@@ -336,7 +336,16 @@ struct WatchData: Codable {
 
     static let legacyAutoDailyGroup = "当日自选"
     static let pickGroupPrefix = "推荐 "
-    static func pickGroupName(day: String) -> String { pickGroupPrefix + String(day.suffix(5)) }
+    /// Recommendations are capped separately for the main board and for
+    /// ChiNext + STAR (20% daily limit), each in its own dated group.
+    static let pickBoards = ["主板", "创业科创"]
+    static func pickBoard(code: String) -> String {
+        code.hasPrefix("688") || code.hasPrefix("689") || code.hasPrefix("300") || code.hasPrefix("301") ? "创业科创" : "主板"
+    }
+    static func pickGroupName(day: String, board: String) -> String { pickGroupPrefix + String(day.suffix(5)) + " " + board }
+    static func pickGroupName(day: String, code: String) -> String { pickGroupName(day: day, board: pickBoard(code: code)) }
+    /// One-group-per-day name used before the board split.
+    static func legacyPickGroupName(day: String) -> String { pickGroupPrefix + String(day.suffix(5)) }
 
     private enum CodingKeys: String, CodingKey { case codes, blacklist, groups, groupByCode, conceptsByCode, menuBarCodes, autoDailyCodes, autoDailyDay, picksByDay, replacedByDay }
     init() {}

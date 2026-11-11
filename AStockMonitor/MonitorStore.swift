@@ -574,15 +574,15 @@ import AppKit
         }
     }
 
-    /// Daily recommendations: at most `dailyPickLimit` 综合 A-grade stocks that
-    /// are not sealed at the limit and still buyable, kept in a per-date group
-    /// (推荐 MM-dd). When a stronger candidate appears and the day is full, the
-    /// weakest pick (by latest score) is swapped out. Past days stay for review.
+    /// Daily recommendations: for each board (主板 / 创业科创) at most
+    /// `dailyPickLimit` 综合 A-grade stocks that are not sealed at the limit and
+    /// still buyable, kept in a dated group per board ("推荐 MM-dd 主板"). When a
+    /// board is full, a stronger candidate (≥ 3 points) swaps out that board's
+    /// weakest pick held at least 10 minutes. Past days stay for review.
     private func autoAddDailyPicks(from report: PotentialReport) {
         let now = Date()
         guard settings.autoAddDailyPicks, isAStockTradingSession(at: now) else { return }
         let day = pickDayKey(now)
-        let group = WatchData.pickGroupName(day: day)
         let limit = min(max(settings.dailyPickLimit, 3), 30)
         let margin = 3
         var updated = watch
@@ -590,11 +590,12 @@ import AppKit
 
         let ranked = report.lists?["all"] ?? report.stocks
         let latestScore = Dictionary(ranked.map { ($0.code, $0.score) }, uniquingKeysWith: { first, _ in first })
-        var picks = updated.picksByDay[day] ?? []
-        // Drop picks the user moved to another group or removed; refresh scores.
-        picks = picks.filter { updated.codes.contains($0.code) && updated.groupByCode[$0.code] == group }
+        // Keep picks still in their board group; refresh scores. A stock that
+        // fell out of the combined list has lost potential.
+        var picks = (updated.picksByDay[day] ?? []).filter {
+            updated.codes.contains($0.code) && updated.groupByCode[$0.code] == WatchData.pickGroupName(day: day, code: $0.code)
+        }
         for index in picks.indices {
-            // A stock that fell out of the combined list has lost potential.
             picks[index].score = latestScore[picks[index].code] ?? max(picks[index].score - 10, 0)
         }
         var replaced = Set(updated.replacedByDay[day] ?? [])
@@ -607,14 +608,17 @@ import AppKit
                   !blacklisted.contains(stock.code), stock.buyable != false,
                   let live = quote(for: stock.code), !live.upperLimit, !live.suspended, !live.isST else { continue }
             if let limitUp = live.limitUpPrice, live.price >= limitUpPrice(limitUp) { continue }
+            let board = WatchData.pickBoard(code: stock.code)
+            let group = WatchData.pickGroupName(day: day, board: board)
             let pick = DailyPick(code: stock.code, name: stock.name, initialScore: stock.score, score: stock.score,
                                  price: live.price, time: now, strategies: stock.strategies ?? [])
-            if picks.count < limit {
+            let boardIndices = picks.indices.filter { WatchData.pickBoard(code: picks[$0].code) == board }
+            if boardIndices.count < limit {
                 picks.append(pick); added.append(pick)
             } else {
                 // Never swap out a pick that has since sealed the limit (it worked),
                 // and hold each pick at least 10 minutes so live score noise does not churn the list.
-                let replaceable = picks.indices.filter {
+                let replaceable = boardIndices.filter {
                     quote(for: picks[$0].code)?.upperLimit != true && now.timeIntervalSince(picks[$0].time) >= 600
                 }
                 guard let weakest = replaceable.min(by: { picks[$0].score < picks[$1].score }),
@@ -628,21 +632,26 @@ import AppKit
             }
             updated.codes.append(pick.code)
             updated.groupByCode[pick.code] = group
+            if !updated.groups.contains(group) { updated.groups.append(group) }
         }
-        if !picks.isEmpty, !updated.groups.contains(group) { updated.groups.append(group) }
         updated.picksByDay[day] = picks.sorted { $0.score > $1.score }
         updated.replacedByDay[day] = Array(replaced).sorted()
         pruneOldPickDays(&updated)
         if !watchEquivalent(updated, watch) { watch = updated }
 
-        if !added.isEmpty {
-            DebugLog.write("当日推荐新增：\(added.map { "\($0.code)\($0.name)(\($0.score))" }.joined(separator: ","))")
-            let names = added.map(\.name)
+        for board in WatchData.pickBoards {
+            let boardAdded = added.filter { WatchData.pickBoard(code: $0.code) == board }
+            guard !boardAdded.isEmpty else { continue }
+            let group = WatchData.pickGroupName(day: day, board: board)
+            let count = picks.filter { WatchData.pickBoard(code: $0.code) == board }.count
+            DebugLog.write("当日推荐新增（\(board)）：\(boardAdded.map { "\($0.code)\($0.name)(\($0.score))" }.joined(separator: ","))")
+            let names = boardAdded.map(\.name)
             enqueueToast(AlertToast(shortType: "当日推荐", name: names.prefix(3).joined(separator: "、") + (names.count > 3 ? " 等" : ""),
-                                    code: added[0].code,
-                                    effect: "综合 A 级、未涨停可买入，加入「\(group)」（今日 \(picks.count)/\(limit) 只）"))
+                                    code: boardAdded[0].code,
+                                    effect: "综合 A 级、未涨停可买入，加入「\(group)」（\(board) \(count)/\(limit) 只）"))
         }
         for swap in swaps {
+            let group = WatchData.pickGroupName(day: day, code: swap.into.code)
             DebugLog.write("当日推荐替换：\(swap.out.code)\(swap.out.name)(\(swap.out.score)) → \(swap.into.code)\(swap.into.name)(\(swap.into.score))")
             enqueueToast(AlertToast(shortType: "推荐替换", name: swap.into.name, code: swap.into.code,
                                     effect: "评分 \(swap.into.score) 替换 \(swap.out.name)（\(swap.out.score)），「\(group)」保持 \(limit) 只"))
@@ -659,10 +668,12 @@ import AppKit
 
     /// The previous build used one 当日自选 group; turn it into a dated group.
     private func migrateLegacyAutoPicks(_ data: inout WatchData) {
-        guard !data.autoDailyCodes.isEmpty || data.groups.contains(WatchData.legacyAutoDailyGroup) else { return }
+        guard !data.autoDailyCodes.isEmpty || data.groups.contains(WatchData.legacyAutoDailyGroup) else {
+            splitLegacyDayGroups(&data)
+            return
+        }
         let legacy = WatchData.legacyAutoDailyGroup
         let day = data.autoDailyDay.isEmpty ? pickDayKey(Date()) : normalizedDayKey(data.autoDailyDay)
-        let group = WatchData.pickGroupName(day: day)
         var picks = data.picksByDay[day] ?? []
         for code in data.autoDailyCodes where data.groupByCode[code] == legacy && !picks.contains(where: { $0.code == code }) {
             let live = quote(for: code)
@@ -670,22 +681,42 @@ import AppKit
             picks.append(DailyPick(code: code, name: live?.name ?? code, initialScore: score, score: score,
                                    price: live?.price ?? 0, time: Date()))
         }
-        for code in data.codes where data.groupByCode[code] == legacy { data.groupByCode[code] = group }
+        for code in data.codes where data.groupByCode[code] == legacy { data.groupByCode[code] = WatchData.legacyPickGroupName(day: day) }
         data.groups.removeAll { $0 == legacy }
-        if !picks.isEmpty {
-            if !data.groups.contains(group) { data.groups.append(group) }
-            // Keep only the configured number, strongest first; extras leave the watchlist.
-            let limit = min(max(settings.dailyPickLimit, 3), 30)
-            let sorted = picks.sorted { $0.score > $1.score }
-            for extra in sorted.dropFirst(limit) {
-                data.codes.removeAll { $0 == extra.code }
-                data.groupByCode.removeValue(forKey: extra.code)
-            }
-            data.picksByDay[day] = Array(sorted.prefix(limit))
-        }
+        if !picks.isEmpty { data.picksByDay[day] = picks }
         data.autoDailyCodes = []
         data.autoDailyDay = ""
-        DebugLog.write("当日自选迁移为日期分组：\(group)，保留 \(data.picksByDay[day]?.count ?? 0) 只")
+        splitLegacyDayGroups(&data)
+    }
+
+    /// Before the board split each day had one 推荐 MM-dd group. Move its codes
+    /// into the per-board groups and keep at most `dailyPickLimit` per board.
+    private func splitLegacyDayGroups(_ data: inout WatchData) {
+        let limit = min(max(settings.dailyPickLimit, 3), 30)
+        for (day, picks) in data.picksByDay {
+            let legacy = WatchData.legacyPickGroupName(day: day)
+            guard data.groups.contains(legacy) || data.groupByCode.values.contains(legacy) else { continue }
+            var kept: [DailyPick] = []
+            for board in WatchData.pickBoards {
+                let boardPicks = picks.filter { WatchData.pickBoard(code: $0.code) == board && data.groupByCode[$0.code] == legacy }
+                    .sorted { $0.score > $1.score }
+                let group = WatchData.pickGroupName(day: day, board: board)
+                for pick in boardPicks.prefix(limit) { data.groupByCode[pick.code] = group }
+                for extra in boardPicks.dropFirst(limit) {
+                    data.codes.removeAll { $0 == extra.code }
+                    data.groupByCode.removeValue(forKey: extra.code)
+                }
+                if !boardPicks.isEmpty, !data.groups.contains(group) { data.groups.append(group) }
+                kept += boardPicks.prefix(limit)
+            }
+            // Codes the user moved into the old group by hand go to the 主板 / 创业科创 group too.
+            for code in data.codes where data.groupByCode[code] == legacy {
+                data.groupByCode[code] = WatchData.pickGroupName(day: day, code: code)
+            }
+            data.groups.removeAll { $0 == legacy }
+            data.picksByDay[day] = kept + picks.filter { pick in !kept.contains(where: { $0.code == pick.code }) && data.groupByCode[pick.code] != nil }
+            DebugLog.write("推荐分组按板块拆分：\(legacy) → 主板 \(kept.filter { WatchData.pickBoard(code: $0.code) == "主板" }.count) 只，创业科创 \(kept.filter { WatchData.pickBoard(code: $0.code) == "创业科创" }.count) 只")
+        }
     }
 
     /// Keep 30 dated recommendation groups; older ones (and their untouched codes) are removed.
@@ -693,11 +724,11 @@ import AppKit
         let days = data.picksByDay.keys.sorted()
         guard days.count > 30 else { return }
         for day in days.dropLast(30) {
-            let group = WatchData.pickGroupName(day: day)
-            let codes = Set(data.codes.filter { data.groupByCode[$0] == group })
+            let groups = Set(WatchData.pickBoards.map { WatchData.pickGroupName(day: day, board: $0) } + [WatchData.legacyPickGroupName(day: day)])
+            let codes = Set(data.codes.filter { groups.contains(data.groupByCode[$0] ?? "") })
             data.codes.removeAll { codes.contains($0) }
             for code in codes { data.groupByCode.removeValue(forKey: code) }
-            data.groups.removeAll { $0 == group }
+            data.groups.removeAll { groups.contains($0) }
             data.picksByDay.removeValue(forKey: day)
             data.replacedByDay.removeValue(forKey: day)
         }
@@ -717,7 +748,7 @@ import AppKit
     /// The recommendation record for a code that still sits in its dated group.
     func dailyPick(for code: String) -> (day: String, pick: DailyPick)? {
         guard let group = watch.groupByCode[code], group.hasPrefix(WatchData.pickGroupPrefix) else { return nil }
-        for (day, picks) in watch.picksByDay where WatchData.pickGroupName(day: day) == group {
+        for (day, picks) in watch.picksByDay where WatchData.pickGroupName(day: day, code: code) == group {
             if let pick = picks.first(where: { $0.code == code }) { return (day, pick) }
         }
         return nil
@@ -725,8 +756,10 @@ import AppKit
 
     /// Picks of one dated group with the return since recommendation, for review.
     func picksSummary(forGroup group: String) -> (count: Int, average: Double?, winners: Int)? {
-        guard let day = watch.picksByDay.keys.first(where: { WatchData.pickGroupName(day: $0) == group }),
-              let picks = watch.picksByDay[day], !picks.isEmpty else { return nil }
+        guard let (day, board) = watch.picksByDay.keys.lazy.flatMap({ day in WatchData.pickBoards.map { (day, $0) } })
+                .first(where: { WatchData.pickGroupName(day: $0.0, board: $0.1) == group }) else { return nil }
+        let picks = (watch.picksByDay[day] ?? []).filter { WatchData.pickBoard(code: $0.code) == board && watch.groupByCode[$0.code] == group }
+        guard !picks.isEmpty else { return nil }
         let returns = picks.compactMap { pick -> Double? in
             guard pick.price > 0, let live = quote(for: pick.code), live.price > 0 else { return nil }
             return (live.price / pick.price - 1) * 100
