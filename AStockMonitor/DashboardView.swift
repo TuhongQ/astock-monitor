@@ -533,6 +533,9 @@ struct DashboardView: View {
         selectedAlertRecords.filter { $0.alertType == "rapid10" || ($0.alertType == nil && $0.changeBasis != "daily") }
     }
 
+    /// 主窗口当前宽度，用于窄窗口时收起指数卡片、告警改为上下分栏。
+    @State private var windowWidth: CGFloat = 1400
+
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
@@ -570,6 +573,11 @@ struct DashboardView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .background(GeometryReader { geo in
+            Color.clear
+                .onAppear { windowWidth = geo.size.width }
+                .onChange(of: geo.size.width) { windowWidth = $0 }
+        })
         .background(keyboardShortcuts)
         .overlay(alignment: .bottomLeading) {
             if let toast = store.alertToast {
@@ -633,10 +641,10 @@ struct DashboardView: View {
             .help(showSidebar ? "隐藏自选股栏（⌘L）" : "显示自选股栏（⌘L）")
             HStack(spacing: 6) {
                 Image(systemName: "chart.xyaxis.line").font(.title3).foregroundStyle(.red)
-                Text("A 股盯盘").font(.headline.bold()).fixedSize()
+                if windowWidth >= 1180 { Text("A 股盯盘").font(.headline.bold()).fixedSize() }
             }
             tabSwitcher
-            indexBar
+            indexBar(Array(["sh000001", "sz399001", "sz399006", "sh000680"].prefix(indexCardCount)))
             Spacer(minLength: 6)
             HStack(spacing: 5) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -651,7 +659,7 @@ struct DashboardView: View {
             }
             .padding(.horizontal, 8).padding(.vertical, 5)
             .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
-            .frame(minWidth: 150, maxWidth: 240)
+            .frame(minWidth: 96, maxWidth: 240)
             Button { store.refresh(); if selectedTab == 2 { store.refreshPotential(force: true) } } label: { Image(systemName: "arrow.clockwise") }
                 .help("立即刷新（⌘R）")
             Button {
@@ -697,9 +705,18 @@ struct DashboardView: View {
         .help("\(title)（⌘\(tag + 1)）")
     }
 
-    private var indexBar: some View {
+    /// 指数卡片按窗口宽度递减：宽屏 4 个，中等 2 个，窄窗口只留上证。
+    private var indexCardCount: Int {
+        let sidebarFree = windowWidth
+        if sidebarFree >= 1340 { return 4 }
+        if sidebarFree >= 1180 { return 2 }
+        if sidebarFree >= 1000 { return 1 }
+        return 0
+    }
+
+    private func indexBar(_ symbols: [String]) -> some View {
         HStack(spacing: 4) {
-            ForEach(["sh000001", "sz399001", "sz399006", "sh000680"], id: \.self) { symbol in
+            ForEach(symbols, id: \.self) { symbol in
                 let index = store.indexQuotes.first { $0.symbol == symbol }
                 Button {
                     DebugLog.write("点击指数入口 symbol=\(symbol), name=\(indexTitle(symbol))")
@@ -1039,9 +1056,17 @@ struct DashboardView: View {
                 case "limit": limitAlertPanel
                 case "rapid": rapidAlertPanel
                 default:
-                    HSplitView {
-                        limitAlertPanel.frame(minWidth: 360)
-                        rapidAlertPanel.frame(minWidth: 320)
+                    if windowWidth - (showSidebar ? 221 : 0) >= 1120 {
+                        HSplitView {
+                            limitAlertPanel.frame(minWidth: 360)
+                            rapidAlertPanel.frame(minWidth: 320)
+                        }
+                    } else {
+                        // 窗口不够并排两张表时改为上下分栏，避免整页被撑宽、两侧被裁掉。
+                        VSplitView {
+                            limitAlertPanel.frame(minHeight: 180)
+                            rapidAlertPanel.frame(minHeight: 140)
+                        }
                     }
                 }
             }
@@ -1073,7 +1098,7 @@ struct DashboardView: View {
             }
             let industries: [(String, Int)] = emotion.map { $0.topIndustries.map { ($0.name, $0.count) } } ?? summary.topIndustries
             if !industries.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
+                ScrollView(.horizontal, showsIndicators: true) {
                     HStack(spacing: 5) {
                         Text("涨停板块").font(.caption2).foregroundStyle(.secondary)
                         ForEach(industries, id: \.0) { name, count in
@@ -1283,8 +1308,7 @@ struct DashboardView: View {
     }
 
     private var strategyBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
+        FlowLayout(spacing: 6) {
                 if strategies.isEmpty {
                     Text("正在加载选股策略…").font(.caption).foregroundStyle(.secondary).padding(.vertical, 8)
                 }
@@ -1313,9 +1337,9 @@ struct DashboardView: View {
                     .buttonStyle(.plain)
                     .help(strategy.description)
                 }
-            }
-            .padding(.horizontal, 12).padding(.vertical, 7)
         }
+        .padding(.horizontal, 12).padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func strategyColor(_ id: String) -> Color {
@@ -2986,7 +3010,7 @@ struct StockAnalysisPage: View {
                 Button { store.analyze(code) } label: { Image(systemName: "arrow.clockwise") }.help("用最新行情重新分析")
             }
             Divider().frame(height: 18)
-            ScrollView(.horizontal, showsIndicators: false) {
+            ScrollView(.horizontal, showsIndicators: true) {
                 HStack(spacing: 6) {
                     ForEach(store.analysisHistory, id: \.self) { entry in
                         Button(entry.split(separator: " ").last.map(String.init) ?? entry) {
@@ -3671,3 +3695,4 @@ struct AnalysisQuotePanel: View {
         }
     }
 }
+
