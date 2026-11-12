@@ -70,7 +70,47 @@ struct RootView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .overlay(alignment: .topTrailing) { SellAlertOverlay() }
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: store.banner)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: store.pendingSellSignals.count)
+    }
+}
+
+/// 与 Mac 版一致的分页切换：图标 + 标题 + 角标，选中项为浮起的圆角块。
+struct PadTabSwitcher: View {
+    @EnvironmentObject var store: PadStore
+    @Binding var tab: Int
+
+    var body: some View {
+        HStack(spacing: 2) {
+            item(0, "行情", "list.bullet.rectangle", nil)
+            item(1, "告警", "bell", store.unseenAlerts > 0 ? min(store.unseenAlerts, 99) : nil)
+            item(2, "潜力股", "scope", (store.lists["all"] ?? []).isEmpty ? nil : (store.lists["all"] ?? []).count, color: .orange)
+            item(3, "个股分析", "stethoscope", nil)
+            item(4, "持仓", "briefcase", store.pendingSellSignals.isEmpty ? (store.holdings.isEmpty ? nil : store.holdings.count) : store.pendingSellSignals.count,
+                 color: store.pendingSellSignals.isEmpty ? .blue : .orange)
+        }
+        .padding(3)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.06)))
+    }
+
+    private func item(_ tag: Int, _ title: String, _ icon: String, _ badge: Int?, color: Color = .red) -> some View {
+        Button { tab = tag } label: {
+            HStack(spacing: 5) {
+                Image(systemName: icon).font(.system(size: 12))
+                Text(title).font(.system(size: 14, weight: tab == tag ? .semibold : .regular))
+                if let badge {
+                    Text("\(badge)").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
+                        .padding(.horizontal, 5).padding(.vertical, 1).background(Capsule().fill(color))
+                }
+            }
+            .padding(.horizontal, 11).padding(.vertical, 5)
+            .foregroundStyle(tab == tag ? Color.primary : Color.secondary)
+            .background(RoundedRectangle(cornerRadius: 8).fill(tab == tag ? Color(uiColor: .secondarySystemGroupedBackground) : .clear))
+            .shadow(color: .black.opacity(tab == tag ? 0.12 : 0), radius: 1.5, y: 0.5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -126,6 +166,7 @@ struct MainTabs: View {
             case 1: AlertsView(open: open)
             case 2: PicksView(open: open)
             case 3: AnalysisView(open: open)
+            case 4: HoldingsView(open: open)
             default: QuoteListView(open: open)
             }
             Divider()
@@ -138,15 +179,7 @@ struct MainTabs: View {
             .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.vertical, 6)
         }
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                Picker("页面", selection: $tab) {
-                    Text("行情").tag(0)
-                    Text(store.unseenAlerts > 0 ? "告警 \(min(store.unseenAlerts, 99))" : "告警").tag(1)
-                    Text("潜力股 \((store.lists["all"] ?? []).count)").tag(2)
-                    Text("个股分析").tag(3)
-                }
-                .pickerStyle(.segmented).frame(width: 460)
-            }
+            ToolbarItem(placement: .principal) { PadTabSwitcher(tab: $tab) }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button { store.refreshNow() } label: { Image(systemName: "arrow.clockwise") }
             }
@@ -172,7 +205,10 @@ struct IndexStrip: View {
                         .foregroundStyle(index.changePercent >= 0 ? Color.red : Color.green)
                     }
                     .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.05)))
+                    .background(RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.045)))
+                    .overlay(alignment: .leading) {
+                        Capsule().fill(index.changePercent >= 0 ? Color.red : Color.green).frame(width: 3).padding(.vertical, 7)
+                    }
                 }
                 if let b = store.breadth {
                     VStack(alignment: .leading, spacing: 2) {

@@ -1,3 +1,4 @@
+import AudioToolbox
 import Foundation
 import SwiftUI
 import UIKit
@@ -36,6 +37,11 @@ final class PadStore: ObservableObject {
     @Published private(set) var analysisHistory: [String] = UserDefaults.standard.stringArray(forKey: "analysis.history") ?? []
     /// Set to a code to switch to the 分析 tab and analyse it (from lists / detail pages).
     @Published var analysisJump: String?
+    /// 持仓与卖点提醒（与 Mac 版同一套规则和回测参数）。
+    @Published var holdings: [Holding] = Persist.read([Holding].self, "holdings.json", fallback: []) { didSet { Persist.write(holdings, "holdings.json") } }
+    @Published var sellSignals: [SellSignal] = Persist.read([SellSignal].self, "sell-signals.json", fallback: []) { didSet { Persist.write(sellSignals, "sell-signals.json") } }
+    @Published var sellAlertsEnabled: Bool = UserDefaults.standard.object(forKey: "sellAlertsEnabled") as? Bool ?? true { didSet { UserDefaults.standard.set(sellAlertsEnabled, forKey: "sellAlertsEnabled") } }
+    var pendingSellSignals: [SellSignal] { sellSignals.filter { !$0.acknowledged } }
     private var analysisTask: Task<Void, Never>?
 
     let tracker = TickTracker()
@@ -134,6 +140,7 @@ final class PadStore: ObservableObject {
             for q in fresh { ingest(q, at: now) }
             quotes = fresh
             byCode = Dictionary(uniqueKeysWithValues: fresh.map { ($0.code, $0) })
+            checkHoldings(at: now)
             breadth = QuantEngine.breadth(fresh)
             lastUpdate = now
             status = String(format: "已连接东方财富 · %d 只 · 用时 %.1f 秒", fresh.count, now.timeIntervalSince(started))
@@ -671,5 +678,120 @@ final class PadStore: ObservableObject {
             ]))
         }
         return groups
+    }
+}
+
+// MARK: - 持仓卖点监控（逻辑与 Mac 版 MonitorStore.checkHoldings 一致）
+
+extension PadStore {
+    func addHolding(code: String, cost: Double, shares: Int?, buyDate: Date, style: String) {
+        let name = quote(code)?.name ?? code
+        var holding = Holding.make(code: code, name: name, cost: cost, shares: shares, buyDate: buyDate, style: style)
+        if let q = quote(code) {
+            let boughtToday = Market.dayKey(buyDate) == Market.dayKey()
+            holding.peakPrice = max(cost, boughtToday ? q.price : (q.high ?? q.price))
+        }
+        holdings.append(holding)
+        let id = holding.id
+        Task {
+            // 用日线补全买入后的最高价；波段止损参考 20 日线。
+            guard let bars = try? await client.fetchDaily(code: code, limit: 60), let index = holdings.firstIndex(where: { $0.id == id }) else { return }
+            var h = holdings[index]
+            let bought = Market.dayKey(h.buyDate)
+            if let high = bars.filter({ $0.date > bought }).map(\.high).max() { h.peakPrice = max(h.peakPrice, high) }
+            let closes = bars.map(\.close)
+            if style == "swing", closes.count >= 20 {
+                let ma20 = closes.suffix(20).reduce(0, +) / 20
+                if ma20 < h.cost { h.stopPrice = max(h.stopPrice, (ma20 * 0.98 * 100).rounded() / 100) }
+            }
+            holdings[index] = h
+            checkHoldings(at: Date())
+        }
+    }
+
+    func removeHolding(_ id: UUID) {
+        holdings.removeAll { $0.id == id }
+        for i in sellSignals.indices where sellSignals[i].holdingID == id { sellSignals[i].acknowledged = true }
+    }
+    func acknowledgeSellSignal(_ id: UUID) {
+        if let i = sellSignals.firstIndex(where: { $0.id == id }) { sellSignals[i].acknowledged = true }
+    }
+    func acknowledgeAllSellSignals() {
+        for i in sellSignals.indices where !sellSignals[i].acknowledged { sellSignals[i].acknowledged = true }
+    }
+
+    func tradingDaysHeld(_ h: Holding, now: Date = Date()) -> Int {
+        let cal = Market.calendar
+        var day = cal.startOfDay(for: h.buyDate), n = 0
+        let end = cal.startOfDay(for: now)
+        while day < end {
+            day = cal.date(byAdding: .day, value: 1, to: day)!
+            let wd = cal.component(.weekday, from: day)
+            if wd != 1 && wd != 7 { n += 1 }
+        }
+        return n
+    }
+
+    func checkHoldings(at now: Date) {
+        guard !holdings.isEmpty else { return }
+        let today = Market.dayKey(now)
+        let minutes = Market.minuteOfDay(now)
+        let session = Market.isSession(now)
+        var changed = holdings
+        var newSignals: [SellSignal] = []
+        for i in changed.indices {
+            var h = changed[i]
+            guard let q = quote(h.code), q.price > 0, !q.suspended else { continue }
+            let boughtToday = Market.dayKey(h.buyDate) == today
+            if session { h.peakPrice = max(h.peakPrice, boughtToday ? q.price : (q.high ?? q.price)) }
+            if q.upperLimit && session { h.sealedDay = today }
+            let pnl = (q.price / h.cost - 1) * 100
+            func fire(_ kind: String, _ title: String, _ detail: String, critical: Bool) {
+                let key = "\(today)|\(kind)"
+                guard session, !h.fired.contains(key) else { return }
+                h.fired.append(key)
+                newSignals.append(SellSignal(holdingID: h.id, code: h.code, name: h.name, kind: kind, title: title, detail: detail,
+                                             price: q.price, pnl: pnl, time: now, critical: critical))
+            }
+            let held = tradingDaysHeld(h, now: now)
+            if q.lowerLimit {
+                fire("limitDown", "封跌停", String(format: "封跌停 ¥%.2f，盈亏 %+.2f%%。跌停可能连续，打开时优先离场。", q.price, pnl), critical: true)
+            } else if q.price <= h.stopPrice {
+                fire("stop", "止损", String(format: "现价 ¥%.2f 跌破止损位 ¥%.2f（成本 ¥%.2f，盈亏 %+.2f%%）。按计划止损，不要补仓摊平。", q.price, h.stopPrice, h.cost, pnl), critical: true)
+            }
+            if let line = h.trailLine, q.price <= line, q.price > h.stopPrice {
+                let back = (1 - q.price / h.peakPrice) * 100
+                let protect = line <= h.cost * 1.0031
+                fire("trail", protect ? "保本卖出" : "高点回落",
+                     String(format: "买入后最高 ¥%.2f（%+.1f%%），现价 ¥%.2f 回落 %.1f%%，%@。现盈亏 %+.2f%%。", h.peakPrice, h.peakGain, q.price, back,
+                            protect ? "利润已回吐到成本附近，保本离场" : "跌破移动止盈线，锁定利润", pnl), critical: false)
+            }
+            if q.price >= h.targetPrice {
+                fire("target", "到达止盈", String(format: "现价 ¥%.2f 达到止盈目标 ¥%.2f，盈利 %+.2f%%。可卖出，或先卖一半、剩余用移动止盈保护。", q.price, h.targetPrice, pnl), critical: false)
+            }
+            if h.sealedDay == today, !q.upperLimit, let limit = q.limitUpPrice, q.price < limit * 0.99 {
+                fire("limitOpen", "涨停打开", String(format: "盘中封过涨停 ¥%.2f，现已打开到 ¥%.2f。炸板后当日回落概率大，可先卖出锁定利润（盈亏 %+.2f%%）。", limit, q.price, pnl), critical: false)
+            }
+            if let prev = q.prevClose, prev > 0, let high = q.high, !boughtToday, pnl > 0,
+               (high / prev - 1) * 100 >= 5, (high - q.price) / prev * 100 >= 4 {
+                fire("fade", "冲高回落", String(format: "今日最高 %+.1f%%，现回落到 %+.1f%%，抛压明显。持仓盈利 %+.2f%%，考虑先减仓。", (high / prev - 1) * 100, q.changePercent, pnl), critical: false)
+            }
+            if minutes >= 14 * 60 + 30 {
+                if h.style == "overnight", held >= 1 {
+                    fire("expire", "隔夜单到期", String(format: "尾盘隔夜单的计划是次日卖出，今天还没触发止盈。收盘前处理，现盈亏 %+.2f%%。", pnl), critical: false)
+                } else if h.style == "short", held >= 3 {
+                    fire("expire", "持有到期", String(format: "短线单已持有 %d 个交易日（回测最优持有期 3 天），现盈亏 %+.2f%%。继续拿的期望不再更高，考虑收盘前离场。", held, pnl), critical: false)
+                } else if h.style == "swing", held >= 10 {
+                    fire("expire", "波段到期", String(format: "波段单已持有 %d 个交易日，现盈亏 %+.2f%%。回测里持有超过 10 天收益反而下降，请复核是否继续持有。", held, pnl), critical: false)
+                }
+            }
+            changed[i] = h
+        }
+        if changed != holdings { holdings = changed }
+        guard !newSignals.isEmpty else { return }
+        sellSignals.insert(contentsOf: newSignals.reversed(), at: 0)
+        if sellSignals.count > 500 { sellSignals.removeLast(sellSignals.count - 500) }
+        guard sellAlertsEnabled else { return }
+        AudioServicesPlaySystemSound(newSignals.contains(where: \.critical) ? 1005 : 1007)
     }
 }

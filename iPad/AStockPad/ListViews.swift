@@ -73,10 +73,11 @@ struct WatchSidebar: View {
     private func row(_ code: String) -> some View {
         let q = store.quote(code)
         let pick = store.pickHistory(code).first
-        return HStack {
+        return HStack(spacing: 8) {
+            Circle().fill(q.map { $0.changePercent >= 0 ? Color.red : Color.green } ?? .gray).frame(width: 6, height: 6)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
-                    Text(q?.name ?? code).foregroundStyle(.primary)
+                    Text(q?.name ?? code).font(.system(size: 15, weight: .medium)).foregroundStyle(.primary)
                     if q?.upperLimit == true {
                         Text(q?.limitStreak.map { $0 > 1 ? "\($0)板" : "涨停" } ?? "涨停").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
                             .padding(.horizontal, 3).background(RoundedRectangle(cornerRadius: 3).fill(Color.red))
@@ -98,7 +99,7 @@ struct WatchSidebar: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
-                Text(Fmt.price(q?.price)).monospacedDigit().foregroundStyle(.primary)
+                Text(Fmt.price(q?.price)).font(.system(size: 16, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(.primary)
                 Text(Fmt.pct(q?.changePercent)).font(.caption).monospacedDigit().foregroundStyle(changeColor(q?.changePercent ?? 0))
             }
         }
@@ -184,9 +185,9 @@ struct QuoteListView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(data) { q in
+                        ForEach(Array(data.enumerated()), id: \.element.id) { i, q in
                             Button { open(q.code) } label: { quoteRow(q) }.buttonStyle(.plain)
-                            Divider().padding(.leading, 14)
+                                .background(i % 2 == 1 ? Color.primary.opacity(0.035) : Color.clear)
                         }
                     }
                 }
@@ -390,28 +391,32 @@ struct PicksView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(QuantEngine.strategies) { item in
-                        let selected = item.id == strategy
-                        Button { strategy = item.id } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: item.icon)
-                                VStack(alignment: .leading, spacing: 0) {
-                                    Text("\(item.title) \((store.lists[item.id] ?? []).count)").font(.system(size: 13, weight: .semibold))
-                                    Text(item.summary).font(.system(size: 10)).lineLimit(1).opacity(0.8)
+            PadFlowLayout(spacing: 8) {
+                ForEach(QuantEngine.strategies) { item in
+                    let selected = item.id == strategy
+                    let tint = strategyColor(item.id)
+                    Button { strategy = item.id } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: item.icon).font(.system(size: 13)).foregroundStyle(selected ? Color.white : tint)
+                            VStack(alignment: .leading, spacing: 0) {
+                                HStack(spacing: 4) {
+                                    Text(item.title).font(.system(size: 13, weight: .semibold))
+                                    Text("\((store.lists[item.id] ?? []).count)").font(.system(size: 11, weight: .bold)).monospacedDigit()
+                                        .foregroundStyle(selected ? Color.white.opacity(0.85) : Color.secondary)
                                 }
+                                Text(item.summary).font(.system(size: 10)).lineLimit(1)
+                                    .foregroundStyle(selected ? Color.white.opacity(0.8) : Color.secondary)
                             }
-                            .padding(.horizontal, 10).padding(.vertical, 6)
-                            .frame(maxWidth: 230, alignment: .leading)
-                            .foregroundStyle(selected ? Color.white : Color.primary)
-                            .background(RoundedRectangle(cornerRadius: 10).fill(selected ? Color.accentColor : Color.primary.opacity(0.06)))
                         }
-                        .buttonStyle(.plain)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .frame(maxWidth: 230, alignment: .leading)
+                        .foregroundStyle(selected ? Color.white : Color.primary)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(selected ? tint : Color.primary.opacity(0.05)))
                     }
+                    .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 12).padding(.vertical, 8)
             }
+            .padding(.horizontal, 12).padding(.vertical, 8)
             HStack(spacing: 10) {
                 DisclosureGroup(isExpanded: $showLogic) {
                     Text(meta.description + " 评分 0–100，≥ 75 为 A、≥ 60 为 B。仅为规则化选股参考，不构成投资建议。")
@@ -444,6 +449,19 @@ struct PicksView: View {
                 }
                 .listStyle(.plain)
             }
+        }
+    }
+
+    private func strategyColor(_ id: String) -> Color {
+        switch id {
+        case "surge": .orange
+        case "limit": .red
+        case "trend": .blue
+        case "pullback": .teal
+        case "leader": .purple
+        case "tail": .indigo
+        case "overnight": .mint
+        default: .pink
         }
     }
 
@@ -582,6 +600,320 @@ struct SettingsView: View {
             }
             .navigationTitle("设置")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+        }
+    }
+}
+
+// MARK: - 持仓卖点
+
+struct HoldingsView: View {
+    @EnvironmentObject var store: PadStore
+    let open: (String) -> Void
+    @State private var codeInput = ""
+    @State private var costInput = ""
+    @State private var sharesInput = ""
+    @State private var buyDate = Date()
+    @State private var style = "short"
+    @State private var formError: String?
+    @State private var editing: Holding?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            addForm
+            Divider()
+            if store.holdings.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "briefcase").font(.system(size: 38)).foregroundStyle(.secondary)
+                    Text("录入已买入的股票，盘中每轮行情刷新都会检查卖点").font(.headline)
+                    Text("止损 · 到达止盈 · 高点回落（移动止盈）· 涨停打开 · 冲高回落 · 持有到期\n触发后弹出提醒卡片并响铃；同一信号每天只提醒一次。应用需保持在前台。")
+                        .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 10) {
+                        ForEach(store.holdings) { h in card(h) }
+                    }
+                    .padding(12)
+                    signalLog
+                }
+            }
+        }
+        .sheet(item: $editing) { h in
+            HoldingEditorPad(holding: h) { updated in
+                if let i = store.holdings.firstIndex(where: { $0.id == updated.id }) { store.holdings[i] = updated }
+                editing = nil
+            } cancel: { editing = nil }
+        }
+    }
+
+    private var addForm: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                field("代码或名称", $codeInput, width: 130, keyboard: .default)
+                field("成本价", $costInput, width: 90, keyboard: .decimalPad)
+                field("股数（可选）", $sharesInput, width: 110, keyboard: .numberPad)
+                DatePicker("买入", selection: $buyDate, in: ...Date(), displayedComponents: .date).labelsHidden()
+                Picker("风格", selection: $style) { ForEach(Holding.styles, id: \.id) { Text($0.title).tag($0.id) } }
+                Button { add() } label: { Label("加入持仓", systemImage: "plus") }.buttonStyle(.borderedProminent)
+                Spacer()
+                Toggle("卖点提醒", isOn: $store.sellAlertsEnabled).fixedSize()
+            }
+            HStack(spacing: 6) {
+                Text(Holding.styles.first { $0.id == style }?.hint ?? "").font(.caption).foregroundStyle(.secondary)
+                if let formError { Text(formError).font(.caption).foregroundStyle(.red) }
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+
+    private func field(_ title: String, _ text: Binding<String>, width: CGFloat, keyboard: UIKeyboardType) -> some View {
+        TextField(title, text: text).keyboardType(keyboard).textInputAutocapitalization(.never)
+            .padding(.horizontal, 9).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
+            .frame(width: width)
+    }
+
+    private func add() {
+        let raw = codeInput.trimmingCharacters(in: .whitespaces)
+        let code: String?
+        if raw.count == 6, raw.allSatisfy(\.isNumber) { code = raw }
+        else { code = store.quotes.first { $0.name == raw }?.code ?? store.quotes.first { !raw.isEmpty && $0.name.contains(raw) }?.code }
+        guard let code, store.quote(code) != nil else { formError = "找不到这只股票"; return }
+        guard let cost = Double(costInput), cost > 0 else { formError = "请填写成本价"; return }
+        formError = nil
+        store.addHolding(code: code, cost: cost, shares: Int(sharesInput), buyDate: buyDate, style: style)
+        codeInput = ""; costInput = ""; sharesInput = ""
+    }
+
+    private func card(_ h: Holding) -> some View {
+        let q = store.quote(h.code)
+        let price = q?.price ?? h.cost
+        let pnl = (price / h.cost - 1) * 100
+        let pending = store.pendingSellSignals.filter { $0.holdingID == h.id }
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(h.name).font(.headline)
+                        Text(Holding.styleTitle(h.style)).font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                    }
+                    Text("\(h.code) · \(h.buyDate.formatted(.dateTime.month().day())) 买入 · 持有 \(store.tradingDaysHeld(h)) 个交易日")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(width: 230, alignment: .leading)
+                metric("成本", String(format: "%.2f", h.cost))
+                metric("现价", String(format: "%.2f", price), color: (q?.changePercent ?? 0) >= 0 ? .red : .green)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("盈亏").font(.caption2).foregroundStyle(.secondary)
+                    Text(String(format: "%+.2f%%", pnl)).font(.system(size: 17, weight: .semibold, design: .rounded)).monospacedDigit()
+                        .foregroundStyle(pnl >= 0 ? .red : .green)
+                    if let shares = h.shares { Text(String(format: "%+.0f 元", (price - h.cost) * Double(shares))).font(.caption2).foregroundStyle(.secondary) }
+                }
+                metric("买入后最高", String(format: "%.2f (%+.1f%%)", h.peakPrice, h.peakGain))
+                Spacer(minLength: 0)
+                if let s = pending.first {
+                    Label(s.title, systemImage: "exclamationmark.triangle.fill").font(.caption.bold()).foregroundStyle(.white)
+                        .padding(.horizontal, 8).padding(.vertical, 4).background(Capsule().fill(s.critical ? Color.green : Color.red))
+                }
+            }
+            HoldingLadder(holding: h, price: price)
+            HStack(spacing: 10) {
+                Text(statusText(h, price: price)).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("修改") { editing = h }.buttonStyle(.bordered).controlSize(.small)
+                Button("个股分析") { store.analysisJump = h.code }.buttonStyle(.bordered).controlSize(.small)
+                Button("详情") { open(h.code) }.buttonStyle(.bordered).controlSize(.small)
+                Button("已卖出") { store.removeHolding(h.id) }.buttonStyle(.bordered).controlSize(.small).tint(.orange)
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(pending.isEmpty ? Color.primary.opacity(0.04) : Color.orange.opacity(0.10)))
+    }
+
+    private func metric(_ title: String, _ value: String, color: Color = .primary) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 15, weight: .medium)).monospacedDigit().foregroundStyle(color)
+        }
+        .fixedSize()
+    }
+
+    private func statusText(_ h: Holding, price: Double) -> String {
+        if let line = h.trailLine { return String(format: "移动止盈已启动，距止盈线 %.1f%%", (price / line - 1) * 100) }
+        return String(format: "距止损 %.1f%% · 距止盈 %.1f%%", (price / h.stopPrice - 1) * 100, max((h.targetPrice / price - 1) * 100, 0))
+    }
+
+    private var signalLog: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !store.sellSignals.isEmpty {
+                HStack {
+                    Text("提醒记录").font(.headline)
+                    Spacer()
+                    Button("清空记录") { store.sellSignals.removeAll() }.controlSize(.small)
+                }
+                ForEach(store.sellSignals.prefix(60)) { s in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(s.time.formatted(.dateTime.month(.twoDigits).day(.twoDigits).hour().minute())).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 100, alignment: .leading)
+                        Text(s.title).font(.caption.bold()).foregroundStyle(s.critical ? .green : .red).frame(width: 70, alignment: .leading)
+                        Text(s.name).font(.caption).frame(width: 80, alignment: .leading)
+                        Text(s.detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        Spacer(minLength: 0)
+                        if !s.acknowledged { Text("待处理").font(.caption2).foregroundStyle(.orange) }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12).padding(.bottom, 12)
+    }
+}
+
+/// 止损 —— 成本 —— 现价 —— 止盈 位置条，移动止盈线启动后以橙色标出。
+struct HoldingLadder: View {
+    let holding: Holding
+    let price: Double
+    var body: some View {
+        let h = holding
+        let low = min(h.stopPrice, price) * 0.995, high = max(h.targetPrice, price, h.peakPrice) * 1.005
+        func x(_ v: Double, _ w: CGFloat) -> CGFloat { CGFloat((v - low) / (high - low)) * w }
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(String(format: "止损 %.2f", h.stopPrice)).foregroundStyle(.green)
+                Spacer()
+                if let line = h.trailLine { Text(String(format: "移动止盈 %.2f", line)).foregroundStyle(.orange) }
+                Spacer()
+                Text(String(format: "止盈 %.2f", h.targetPrice)).foregroundStyle(.red)
+            }
+            .font(.caption2).monospacedDigit()
+            GeometryReader { geo in
+                let w = geo.size.width
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.primary.opacity(0.08)).frame(height: 6)
+                    Rectangle().fill(Color.green).frame(width: 2, height: 14).offset(x: x(h.stopPrice, w) - 1)
+                    Rectangle().fill(Color.secondary).frame(width: 1, height: 14).offset(x: x(h.cost, w))
+                    Rectangle().fill(Color.red).frame(width: 2, height: 14).offset(x: x(h.targetPrice, w) - 1)
+                    if let line = h.trailLine { Rectangle().fill(Color.orange).frame(width: 2, height: 14).offset(x: x(line, w) - 1) }
+                    Circle().fill(price >= h.cost ? Color.red : Color.green).frame(width: 12, height: 12).offset(x: x(price, w) - 6)
+                }
+                .frame(height: 14)
+            }
+            .frame(height: 14)
+        }
+    }
+}
+
+private struct HoldingEditorPad: View {
+    @State var holding: Holding
+    let save: (Holding) -> Void
+    let cancel: () -> Void
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("买入") {
+                    LabeledContent("成本价") { TextField("成本价", value: $holding.cost, format: .number.precision(.fractionLength(2))).keyboardType(.decimalPad).multilineTextAlignment(.trailing) }
+                    LabeledContent("股数") { TextField("股数", value: $holding.shares, format: .number).keyboardType(.numberPad).multilineTextAlignment(.trailing) }
+                    DatePicker("买入日期", selection: $holding.buyDate, in: ...Date(), displayedComponents: .date)
+                    Picker("风格", selection: $holding.style) { ForEach(Holding.styles, id: \.id) { Text($0.title).tag($0.id) } }
+                }
+                Section("卖出规则") {
+                    LabeledContent("止损价") { TextField("止损价", value: $holding.stopPrice, format: .number.precision(.fractionLength(2))).keyboardType(.decimalPad).multilineTextAlignment(.trailing) }
+                    LabeledContent("止盈价") { TextField("止盈价", value: $holding.targetPrice, format: .number.precision(.fractionLength(2))).keyboardType(.decimalPad).multilineTextAlignment(.trailing) }
+                    LabeledContent("盈利 % 后启动移动止盈") { TextField("", value: $holding.trailActivate, format: .number).keyboardType(.decimalPad).multilineTextAlignment(.trailing) }
+                    LabeledContent("从最高价回落 % 提醒") { TextField("", value: $holding.trailDrawdown, format: .number).keyboardType(.decimalPad).multilineTextAlignment(.trailing) }
+                    LabeledContent("买入后最高价") { TextField("", value: $holding.peakPrice, format: .number.precision(.fractionLength(2))).keyboardType(.decimalPad).multilineTextAlignment(.trailing) }
+                    Button("按风格重置参数") {
+                        let d = Holding.make(code: holding.code, name: holding.name, cost: holding.cost, shares: holding.shares, buyDate: holding.buyDate, style: holding.style)
+                        holding.stopPrice = d.stopPrice; holding.targetPrice = d.targetPrice
+                        holding.trailActivate = d.trailActivate; holding.trailDrawdown = d.trailDrawdown
+                    }
+                }
+            }
+            .navigationTitle("\(holding.name)（\(holding.code)）")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消", action: cancel) }
+                ToolbarItem(placement: .confirmationAction) { Button("保存") { save(holding) } }
+            }
+        }
+    }
+}
+
+/// 卖点提醒卡片：浮在所有页面右上角，逐条确认后消失。
+struct SellAlertOverlay: View {
+    @EnvironmentObject var store: PadStore
+    var body: some View {
+        let pending = store.pendingSellSignals
+        if store.sellAlertsEnabled && !pending.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: "bell.badge.fill").foregroundStyle(.orange)
+                    Text("\(pending.count) 条卖点提醒").font(.headline)
+                    Spacer()
+                    Button("全部知道了") { store.acknowledgeAllSellSignals() }.font(.caption)
+                }
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(pending) { s in
+                            let color: Color = s.critical ? .green : .red
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack(spacing: 6) {
+                                    Text(s.title).font(.caption.bold()).foregroundStyle(.white)
+                                        .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(color))
+                                    Text(s.name).font(.headline)
+                                    Text(s.code).font(.caption.monospaced()).foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text(String(format: "%+.2f%%", s.pnl)).font(.headline.monospacedDigit()).foregroundStyle(s.pnl >= 0 ? .red : .green)
+                                }
+                                Text(s.detail).font(.callout).fixedSize(horizontal: false, vertical: true)
+                                HStack {
+                                    Text(s.time.formatted(date: .omitted, time: .standard)).font(.caption2).foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button("已卖出，移出持仓") { store.removeHolding(s.holdingID); store.acknowledgeSellSignal(s.id) }
+                                        .buttonStyle(.bordered).controlSize(.small)
+                                    Button("知道了") { store.acknowledgeSellSignal(s.id) }.buttonStyle(.borderedProminent).controlSize(.small)
+                                }
+                            }
+                            .padding(10)
+                            .background(RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.08)))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(color.opacity(0.35)))
+                        }
+                    }
+                }
+                .frame(maxHeight: 360)
+                Text("规则提醒仅供参考，是否卖出由你决定。").font(.caption2).foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .frame(width: 440)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            .shadow(color: .black.opacity(0.25), radius: 18, y: 6)
+            .padding(.top, 70).padding(.trailing, 16)
+            .transition(.move(edge: .trailing).combined(with: .opacity))
+        }
+    }
+}
+
+
+/// 自动换行的横向排列（策略卡片等），与 Mac 版一致。
+struct PadFlowLayout: Layout {
+    var spacing: CGFloat = 8
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0, maxX: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > 0 && x + size.width > width { x = 0; y += rowHeight + spacing; rowHeight = 0 }
+            x += size.width + spacing; maxX = max(maxX, x - spacing); rowHeight = max(rowHeight, size.height)
+        }
+        return CGSize(width: proposal.width ?? maxX, height: y + rowHeight)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, rowHeight: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > bounds.minX && x + size.width > bounds.maxX { x = bounds.minX; y += rowHeight + spacing; rowHeight = 0 }
+            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing; rowHeight = max(rowHeight, size.height)
         }
     }
 }

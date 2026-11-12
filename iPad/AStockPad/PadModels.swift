@@ -382,3 +382,77 @@ enum Market {
         (code.hasPrefix("6") || code.hasPrefix("9") && !code.hasPrefix("92")) ? "1.\(code)" : "0.\(code)"
     }
 }
+
+// MARK: - 持仓卖点监控
+
+/// 一笔已买入的持仓。卖出规则按持有风格给默认值，录入后可逐项修改。
+struct Holding: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var code: String
+    var name: String
+    var cost: Double
+    var shares: Int?
+    var buyDate: Date
+    /// overnight 尾盘隔夜（次日卖） / short 短线 1–3 天 / swing 波段
+    var style: String
+    var stopPrice: Double
+    var targetPrice: Double
+    /// 盈利达到该比例后启动移动止盈（%）。
+    var trailActivate: Double
+    /// 自买入后最高价回落该比例即提醒（%）。
+    var trailDrawdown: Double
+    /// 买入后出现过的最高价（收盘后不清零）。
+    var peakPrice: Double
+    var note: String = ""
+    /// 已提醒过的信号："yyyy-MM-dd|类型"，同一信号每天只弹一次。
+    var fired: [String] = []
+    /// 本交易日盘中是否封过涨停（用于识别涨停打开）。
+    var sealedDay: String?
+
+    /// 默认参数来自 2026-11-12 回测（1057 只 × 1 年日线，扣 0.15% 成本）：卖出规则几乎不改变平均收益，
+    /// 主要作用是把最差 5% 的亏损从 −7%~−14% 压到 −4%~−8%；参数取「平均收益不变差、尾部亏损最小」的一组。
+    static let styles: [(id: String, title: String, hint: String)] = [
+        ("overnight", "尾盘隔夜", "次日冲高卖：止盈 +3%，止损 −5%（−3% 会被次日低开先打掉，回测更差），次日 14:30 未走提醒清仓"),
+        ("short", "短线 1–3 天", "止损 −4%、止盈 +10%，盈利 5% 后从高点回落 3% 提醒，持满 3 个交易日提醒离场"),
+        ("swing", "波段", "止损 −8% 或跌破 20 日线、止盈 +10%，盈利 6% 后从高点回落 5% 提醒，持满 10 个交易日提醒复核"),
+    ]
+    static func styleTitle(_ id: String) -> String { styles.first { $0.id == id }?.title ?? id }
+
+    /// 按风格生成默认卖出参数。
+    static func make(code: String, name: String, cost: Double, shares: Int?, buyDate: Date, style: String) -> Holding {
+        let (stop, target, activate, drawdown): (Double, Double, Double, Double)
+        switch style {
+        case "overnight": (stop, target, activate, drawdown) = (5, 3, 3, 1.5)
+        case "swing": (stop, target, activate, drawdown) = (8, 10, 6, 5)
+        default: (stop, target, activate, drawdown) = (4, 10, 5, 3)
+        }
+        return Holding(code: code, name: name, cost: cost, shares: shares, buyDate: buyDate, style: style,
+                       stopPrice: (cost * (1 - stop / 100) * 100).rounded() / 100,
+                       targetPrice: (cost * (1 + target / 100) * 100).rounded() / 100,
+                       trailActivate: activate, trailDrawdown: drawdown, peakPrice: cost)
+    }
+
+    var peakGain: Double { (peakPrice / cost - 1) * 100 }
+    /// 移动止盈线：利润启动后为 max(最高价回落线, 保本价)，未启动时为 nil。
+    var trailLine: Double? {
+        guard peakGain >= trailActivate else { return nil }
+        return max(peakPrice * (1 - trailDrawdown / 100), cost * 1.003)
+    }
+}
+
+/// 一次卖出提醒（弹窗与「持仓」页提醒记录共用）。
+struct SellSignal: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var holdingID: UUID
+    var code: String
+    var name: String
+    var kind: String
+    var title: String
+    var detail: String
+    var price: Double
+    var pnl: Double
+    var time: Date
+    /// critical：止损 / 跌停等必须处理；normal：止盈类。
+    var critical: Bool
+    var acknowledged = false
+}
