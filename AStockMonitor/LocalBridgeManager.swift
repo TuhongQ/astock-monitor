@@ -18,32 +18,73 @@ import Foundation
     /// never run two installs at once.
     private var pythonPreparation: Task<String?, Never>?
 
-    private static let apiVersion = 25
-    private static let port = 8767
+    private static let apiVersion = 26
+    /// Default bridge port; if another program holds it the bridge moves to the
+    /// next free port in this range and the app follows it.
+    nonisolated static let defaultPort = 8767
+    nonisolated static let candidatePorts = Array(8767...8786)
+    private(set) var port: Int = {
+        let saved = UserDefaults.standard.integer(forKey: "bridgePort")
+        return candidatePorts.contains(saved) ? saved : defaultPort
+    }()
+
+    /// True for the bundled local bridge addresses (any port this manager may use, plus the old 8765/8766).
+    nonisolated static func isBundledURL(_ url: String) -> Bool {
+        guard let components = URLComponents(string: url), let host = components.host,
+              host == "127.0.0.1" || host == "localhost", let port = components.port else { return false }
+        return port == 8765 || port == 8766 || candidatePorts.contains(port)
+    }
+    nonisolated static var currentURL: String { "http://127.0.0.1:\(UserDefaults.standard.integer(forKey: "bridgePort") == 0 ? defaultPort : UserDefaults.standard.integer(forKey: "bridgePort"))" }
+
+    private func adopt(_ port: Int) {
+        if self.port != port { DebugLog.write("行情服务端口改为 \(port)（\(Self.defaultPort) 被其他程序占用）") }
+        self.port = port
+        UserDefaults.standard.set(port, forKey: "bridgePort")
+        let saved = UserDefaults.standard.string(forKey: "serviceURL") ?? ""
+        if saved.isEmpty || Self.isBundledURL(saved) {
+            UserDefaults.standard.set("http://127.0.0.1:\(port)", forKey: "serviceURL")
+        }
+    }
 
     private enum Health: Equatable { case ready, stale, missingAkShare, unavailable }
 
     func ensureRunning() async -> Bool {
         let ensureStarted = ProcessInfo.processInfo.systemUptime
-        switch await health() {
-        case .ready:
-            DebugLog.write("本地桥接服务版本校验通过，复用服务；health=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - ensureStarted))s")
-            return true
-        case .stale, .missingAkShare:
-            DebugLog.write("端口 \(Self.port) 上的行情服务版本过旧或缺少 AkShare，尝试关闭后重启")
-            guard await terminateLeftoverBridge() else {
-                failureMessage = "检测到旧版行情服务且无法自动关闭。请完全退出旧版 A 股盯盘后重新打开新版。"
-                DebugLog.write(failureMessage)
-                return false
+        // Try the last used port first, then the rest of the range.
+        var chosen: Int?
+        for candidate in [port] + Self.candidatePorts.filter({ $0 != port }) {
+            switch await health(candidate) {
+            case .ready:
+                adopt(candidate)
+                DebugLog.write("本地桥接服务版本校验通过，复用端口 \(candidate)；health=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - ensureStarted))s")
+                return true
+            case .stale, .missingAkShare, .unavailable:
+                let listeners = await Self.listeners(on: candidate)
+                if listeners.isEmpty { chosen = candidate; break }
+                if listeners.allSatisfy({ $0.command.contains("akshare_server.py") }) {
+                    DebugLog.write("端口 \(candidate) 上的行情服务版本过旧或缺少 AkShare，关闭后重启")
+                    if await terminateLeftoverBridge(on: candidate, listeners) { chosen = candidate; break }
+                    DebugLog.write("无法关闭端口 \(candidate) 上的旧行情服务，换下一个端口")
+                    continue
+                }
+                DebugLog.write("端口 \(candidate) 被其他程序占用（\(listeners.map { "pid=\($0.pid) \($0.command.prefix(80))" }.joined(separator: "; "))），换下一个端口")
+                continue
             }
-        case .unavailable: break
+            if chosen != nil { break }
         }
+        guard let chosen else {
+            failureMessage = "端口 \(Self.candidatePorts.first!)–\(Self.candidatePorts.last!) 都被占用，无法启动本地行情服务。"
+            DebugLog.write(failureMessage)
+            return false
+        }
+        port = chosen
+
         guard let script = Bundle.main.url(forResource: "akshare_server", withExtension: "py") else { DebugLog.write("应用资源中找不到 akshare_server.py"); return false }
         guard let python = await preparedPython() else { DebugLog.write(failureMessage); return false }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
-        process.arguments = [script.path]
+        process.arguments = [script.path, "--port", String(port)]
         process.currentDirectoryURL = script.deletingLastPathComponent()
         process.environment = Self.childEnvironment()
 
@@ -62,7 +103,7 @@ import Foundation
         do {
             try process.run()
             self.process = process
-            DebugLog.write("已启动本地行情服务 pid=\(process.processIdentifier), python=\(python)")
+            DebugLog.write("已启动本地行情服务 pid=\(process.processIdentifier), port=\(port), python=\(python)")
         } catch {
             failureMessage = "启动本地服务失败：\(error.localizedDescription)"
             DebugLog.write("启动行情服务进程失败：\(error.localizedDescription)")
@@ -71,8 +112,9 @@ import Foundation
         onProgress?("正在启动本地 AkShare 行情服务…")
 
         for _ in 0..<30 {
-            switch await health() {
+            switch await health(port) {
             case .ready:
+                adopt(port)
                 DebugLog.write("本地行情服务版本校验通过；启动+health=\(String(format: "%.3f", ProcessInfo.processInfo.systemUptime - ensureStarted))s")
                 return true
             case .stale, .missingAkShare:
@@ -88,7 +130,8 @@ import Foundation
             }
             try? await Task.sleep(for: .milliseconds(500))
         }
-        let healthy = await health() == .ready
+        let healthy = await health(port) == .ready
+        if healthy { adopt(port) }
         if !healthy { failureMessage = "等待本地行情服务启动超时。详情见调试日志。"; DebugLog.write(failureMessage) }
         return healthy
     }
@@ -100,8 +143,8 @@ import Foundation
         process = nil
     }
 
-    private func health() async -> Health {
-        guard let url = URL(string: "http://127.0.0.1:\(Self.port)/health") else { return .unavailable }
+    private func health(_ port: Int) async -> Health {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/health") else { return .unavailable }
         var request = URLRequest(url: url)
         request.timeoutInterval = 1
         guard let (data, response) = try? await URLSession.shared.data(for: request),
@@ -223,28 +266,30 @@ import Foundation
 
     // MARK: - Leftover bridge
 
+    private struct Listener { let pid: Int32; let command: String }
+
+    private static func listeners(on port: Int) async -> [Listener] {
+        let pids = await output("/usr/sbin/lsof", ["-nP", "-t", "-iTCP:\(port)", "-sTCP:LISTEN"])
+            .split(whereSeparator: \.isNewline).compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+        var result: [Listener] = []
+        for pid in Set(pids) {
+            result.append(Listener(pid: pid, command: await output("/bin/ps", ["-o", "command=", "-p", String(pid)])))
+        }
+        return result
+    }
+
     /// Stop a bridge left on the port by an earlier build or a crashed copy.
     /// Only processes whose command line runs akshare_server.py are signalled.
-    private func terminateLeftoverBridge() async -> Bool {
-        let pids = await Self.output("/usr/sbin/lsof", ["-nP", "-t", "-iTCP:\(Self.port)", "-sTCP:LISTEN"])
-            .split(whereSeparator: \.isNewline).compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
-        var signalled = false
-        for pid in pids {
-            let command = await Self.output("/bin/ps", ["-o", "command=", "-p", String(pid)])
-            guard command.contains("akshare_server.py") else {
-                DebugLog.write("端口 \(Self.port) 被其他程序占用（pid=\(pid)），不做处理")
-                continue
-            }
-            kill(pid, SIGTERM)
-            signalled = true
-            DebugLog.write("已关闭残留行情服务 pid=\(pid)")
+    private func terminateLeftoverBridge(on port: Int, _ listeners: [Listener]) async -> Bool {
+        for listener in listeners where listener.command.contains("akshare_server.py") {
+            kill(listener.pid, SIGTERM)
+            DebugLog.write("已关闭残留行情服务 pid=\(listener.pid), port=\(port)")
         }
-        guard signalled else { return false }
         for _ in 0..<20 {
-            if await health() == .unavailable { return true }
+            if await Self.listeners(on: port).isEmpty { return true }
             try? await Task.sleep(for: .milliseconds(250))
         }
-        return await health() == .unavailable
+        return await Self.listeners(on: port).isEmpty
     }
 
     private static func output(_ executable: String, _ arguments: [String]) async -> String {

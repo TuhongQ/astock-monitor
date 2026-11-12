@@ -373,10 +373,9 @@ import AppKit
         timer?.invalidate()
         timer = nil
         monitoringActive = true
-        let oldBundledURLs: Set<String> = ["http://127.0.0.1:8765", "http://127.0.0.1:8766"]
-        let defaultBundledURL = "http://127.0.0.1:8767"
         let savedServiceURL = UserDefaults.standard.string(forKey: "serviceURL")
-        let serviceURL = savedServiceURL == nil || oldBundledURLs.contains(savedServiceURL ?? "") ? defaultBundledURL : savedServiceURL!
+        // The bundled bridge may sit on another port when 8767 is taken; the manager keeps serviceURL in sync.
+        let serviceURL = savedServiceURL == nil || LocalBridgeManager.isBundledURL(savedServiceURL ?? "") ? LocalBridgeManager.currentURL : savedServiceURL!
         if savedServiceURL != serviceURL { UserDefaults.standard.set(serviceURL, forKey: "serviceURL") }
         let needsLocalBridge = serviceURL.contains("127.0.0.1") || serviceURL.contains("localhost")
         status = needsLocalBridge ? "正在启动本地 AkShare 行情服务…" : "正在连接行情服务器…"
@@ -492,8 +491,7 @@ import AppKit
         if ![30, 60, 120, 180, 300].contains(normalizedSettings.windowSeconds) { normalizedSettings.windowSeconds = 60 }
         settings = normalizedSettings
         provider = newProvider
-        let oldBundledURLs: Set<String> = ["http://127.0.0.1:8765", "http://127.0.0.1:8766"]
-        let appliedServiceURL = oldBundledURLs.contains(serviceURL) ? "http://127.0.0.1:8767" : serviceURL
+        let appliedServiceURL = LocalBridgeManager.isBundledURL(serviceURL) ? LocalBridgeManager.currentURL : serviceURL
         UserDefaults.standard.set(appliedServiceURL, forKey: "serviceURL")
         DebugLog.write("已应用设置 provider=\(newProvider), serviceURL=\(appliedServiceURL), refresh=\(normalizedSettings.refreshSeconds)s")
         start()

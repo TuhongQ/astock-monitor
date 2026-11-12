@@ -28,7 +28,7 @@ socket.setdefaulttimeout(10)
 
 HOST, PORT, CACHE_SECONDS = "127.0.0.1", 8767, 1.5
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-API_VERSION = 25
+API_VERSION = 26
 INDEX_SYMBOLS = {
     "sh000001": "上证指数", "sz399001": "深证成指",
     "sz399006": "创业板指", "sh000680": "科创综指",
@@ -3869,6 +3869,13 @@ def pick_log_scheduler():
         time.sleep(30)
 
 if __name__ == "__main__":
+    import sys
+    # The app passes --port when 8767 is taken by another program.
+    if "--port" in sys.argv:
+        try:
+            PORT = int(sys.argv[sys.argv.index("--port") + 1])
+        except (IndexError, ValueError):
+            print("Invalid --port argument; using default", flush=True)
     threading.Thread(target=pick_log_scheduler, name="pick-log", daemon=True).start()
     print(f"AkShare bridge listening on http://{HOST}:{PORT}; quote cache={CACHE_SECONDS}s; derived-data disk caches=24h", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

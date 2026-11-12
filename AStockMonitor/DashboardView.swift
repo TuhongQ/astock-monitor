@@ -2336,7 +2336,7 @@ struct SettingsView: View {
         _draftProvider = State(initialValue: store.provider)
         let savedURL = UserDefaults.standard.string(forKey: "serviceURL")
         let oldBundledURLs: Set<String> = ["http://127.0.0.1:8765", "http://127.0.0.1:8766"]
-        _serviceURL = State(initialValue: savedURL == nil || oldBundledURLs.contains(savedURL ?? "") ? "http://127.0.0.1:8767" : savedURL!)
+        _serviceURL = State(initialValue: savedURL == nil || oldBundledURLs.contains(savedURL ?? "") ? LocalBridgeManager.currentURL : savedURL!)
     }
 
     var body: some View {
@@ -2439,7 +2439,7 @@ struct SettingsView: View {
                                 Text("新浪（AkShare，较慢）").tag("sina")
                             }.labelsHidden().frame(width: 300)
                         }
-                        HStack(spacing: 10) { settingLabel("服务地址", detail: "本机行情桥接服务"); TextField("http://127.0.0.1:8767", text: $serviceURL).textFieldStyle(.roundedBorder) }
+                        HStack(spacing: 10) { settingLabel("服务地址", detail: "本机行情桥接服务；默认端口 8767 被占用时自动换用 8768–8786"); TextField("http://127.0.0.1:8767", text: $serviceURL).textFieldStyle(.roundedBorder) }
                         HStack(spacing: 10) {
                             Button(testing ? "正在测试…" : "测试连接") {
                                 testing = true; testResult = "正在连接所选数据源…"

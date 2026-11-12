@@ -3,7 +3,7 @@ import Foundation
 /// Thin client for the bundled companion service. All remote rate limiting is performed there.
 actor MarketService {
     static let shared = MarketService()
-    private var baseURL: String { UserDefaults.standard.string(forKey: "serviceURL") ?? "http://127.0.0.1:8767" }
+    private var baseURL: String { UserDefaults.standard.string(forKey: "serviceURL") ?? LocalBridgeManager.currentURL }
     private var etags: [String: String] = [:]
     private var intradayHistoryCache: [String: (Date, [PricePoint])] = [:]
     private var fiveDayTrendCache: [String: (Date, [PricePoint])] = [:]
