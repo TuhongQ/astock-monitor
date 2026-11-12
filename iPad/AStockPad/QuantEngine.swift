@@ -387,6 +387,9 @@ enum QuantEngine {
             if q.amount < 1e8 { score -= 4; risks.append("成交额不足 1 亿，流动性一般") }
             if let f = ctx.features(q) {
                 let (bonus, s, r) = dailyBonus(f); score += bonus; signals += s; risks += r
+                let (chase, cr) = QuantEngine.chasePenalty(f, change: q.changePercent, upperLimit: q.upperLimit)
+                score -= chase * 0.5; risks += cr.filter { !risks.contains($0) }
+                if q.changePercent >= 5 && !q.upperLimit { risks.append("速拉是盘中信号：尾盘追入过夜，次日平均低开") }
             }
             if ctx.weak { score *= 0.9 }
             var highlights = ["\(event.time) 起拉", String(format: "%d 秒 +%.1f%%", max(event.seconds, 1), event.rise),
@@ -566,6 +569,8 @@ enum QuantEngine {
             if f.price < f.ma60 { score -= 6; risks.append("仍在 60 日线下方，上方有套牢盘") }
             if let ar = f.amountRatio, ar > 3.5, q.changePercent < 1 { score -= 10; risks.append("放量滞涨") }
             if (f.todayHigh - f.price) / f.prevClose > 0.03 { score -= 6; risks.append("冲高回落，上影线较长") }
+            let (chase, chaseRisks) = QuantEngine.chasePenalty(f, change: q.changePercent, upperLimit: q.upperLimit)
+            score -= chase; risks += chaseRisks.filter { !risks.contains($0) }
             if ctx.weak { score *= 0.85 }
             let level = pivot ?? f.ma10
             let stop = max(min(level * 0.97, f.ma20 * 0.98), f.price * 0.92)
@@ -831,5 +836,29 @@ enum QuantEngine {
             pick.tags = titles + pick.tags.filter { !titles.contains($0) }
             return pick
         }.sorted { ($0.score, $0.strategies.count) > ($1.score, $1.strategies.count) }.prefix(30).map { $0 }
+    }
+}
+
+
+extension QuantEngine {
+    /// 追高型突破扣分，与服务端 `_chase_penalty` 一致（2026-11-12 复盘 + 1057 只 × 1 年日线回测：
+    /// 当日涨 ≥5%、额比 ≥3.5、乖离 ≥10% 的趋势信号 5 日平均跑输大盘约 2%）。
+    static func chasePenalty(_ f: DailyFeatures, change: Double, upperLimit: Bool) -> (Double, [String]) {
+        var penalty = 0.0, risks: [String] = [], hits = 0
+        let ratio = f.amountRatio
+        if let r = ratio, r >= 5 { penalty += 12; hits += 1; risks.append(String(format: "巨量 %.1f 倍，回测 5 日平均跑输大盘", r)) }
+        else if let r = ratio, r >= 3.5, change >= 1 { penalty += 6; hits += 1; risks.append(String(format: "放量 %.1f 倍，分歧加大", r)) }
+        if f.bias20 > 0.10 && f.bias20 <= 0.15 { penalty += 6; hits += 1 } else if f.bias20 > 0.15 { hits += 1 }
+        if f.prevClose > 0 && f.todayHigh > 0 && (f.todayHigh - f.price) / f.prevClose > 0.05 {
+            penalty += 10; hits += 1
+            risks.append(String(format: "冲高回落 %.1f%%，抛压重", (f.todayHigh - f.price) / f.prevClose * 100))
+        }
+        if !upperLimit && change >= 6 && change < 12 {
+            penalty += 6; hits += 1; risks.append(String(format: "当日已涨 %.1f%%，次日回吐概率高", change))
+        }
+        if hits >= 3 || (change >= 5 && (ratio ?? 0) >= 3.5 && f.bias20 >= 0.10) {
+            risks.insert("追高型突破：回测次日平均低开约 1%、5 日跑输大盘约 2%，等回踩 10 日线再考虑", at: 0)
+        }
+        return (penalty, risks)
     }
 }

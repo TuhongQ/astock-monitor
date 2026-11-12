@@ -28,7 +28,7 @@ socket.setdefaulttimeout(10)
 
 HOST, PORT, CACHE_SECONDS = "127.0.0.1", 8767, 1.5
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-API_VERSION = 26
+API_VERSION = 27
 INDEX_SYMBOLS = {
     "sh000001": "上证指数", "sz399001": "深证成指",
     "sz399006": "创业板指", "sh000680": "科创综指",
@@ -1782,6 +1782,10 @@ def strategy_surge(ctx):
         if features:
             bonus, extra_signals, extra_risks = _daily_structure_bonus(features)
             score += bonus; signals.extend(extra_signals); risks.extend(extra_risks)
+            chase, chase_risks = _chase_penalty(features, change, bool(q.get("upperLimit")))
+            score -= chase * 0.5; risks.extend(r for r in chase_risks if r not in risks)
+            if change >= 5 and not q.get("upperLimit"):
+                risks.append("速拉是盘中信号：尾盘追入过夜，次日平均低开")
         if ctx["weak"]:
             score *= 0.9
         highlights = [f"{event['time']} 起拉", f"{max(event['seconds'], 1)} 秒 +{event['rise']:.1f}%",
@@ -2028,6 +2032,34 @@ def screen_snapshot(rows, strong_industries, limit=POTENTIAL_STAGE1_LIMIT, live=
     picks.sort(key=lambda item: item[0], reverse=True)
     return picks[:limit]
 
+def _chase_penalty(f, change, upper_limit=False):
+    """追高型突破扣分（2026-11-12 复盘 + 1057 只 × 1 年日线回测）。
+
+    趋势信号里「当日涨 ≥5%、成交额 ≥ 5 日均值 3.5 倍、偏离 20 日线 ≥10%」的 408 次，
+    次日平均低开 1%，5 日平均跑输同期大盘 2%，只有 35% 跑赢；巨量 ≥5 倍、冲高回落 ≥5%、
+    当日涨 6–12%（未封板）也各自稳定偏负。涨停封板的不扣（封板次日仍有溢价）。
+    """
+    penalty, risks, hits = 0.0, [], 0
+    ratio = f.get("amountRatio")
+    bias = f.get("bias20", 0)
+    if ratio is not None and ratio >= 5:
+        penalty += 12; hits += 1; risks.append(f"巨量 {ratio:.1f} 倍，回测 5 日平均跑输大盘")
+    elif ratio is not None and ratio >= 3.5 and change >= 1:
+        penalty += 6; hits += 1; risks.append(f"放量 {ratio:.1f} 倍，分歧加大")
+    if 0.10 < bias <= 0.15:
+        penalty += 6; hits += 1
+    elif bias > 0.15:
+        hits += 1
+    today = f.get("todayBar") or {}
+    prev = f.get("prevClose") or 0
+    if prev > 0 and today.get("high", 0) > 0 and (today["high"] - f["price"]) / prev > 0.05:
+        penalty += 10; hits += 1; risks.append(f"冲高回落 {(today['high'] - f['price']) / prev * 100:.1f}%，抛压重")
+    if not upper_limit and 6 <= change < 12:
+        penalty += 6; hits += 1; risks.append(f"当日已涨 {change:.1f}%，次日回吐概率高")
+    if hits >= 3 or (change >= 5 and (ratio or 0) >= 3.5 and bias >= 0.10):
+        risks.insert(0, "追高型突破：回测次日平均低开约 1%、5 日跑输大盘约 2%，等回踩 10 日线再考虑")
+    return penalty, risks
+
 def analyze_trend(q, history, stage1_score, stage1_reasons, strong_industries, now, weak_market, surged=None):
     f = daily_features(q, history, now)
     if not f:
@@ -2111,6 +2143,8 @@ def analyze_trend(q, history, stage1_score, stage1_reasons, strong_industries, n
         score -= 10; risks.append("放量滞涨")
     if f["todayBar"]["high"] > 0 and (f["todayBar"]["high"] - p) / f["prevClose"] > 0.03:
         score -= 6; risks.append("冲高回落，上影线较长")
+    chase, chase_risks = _chase_penalty(f, change, bool(q.get("upperLimit")))
+    score -= chase; risks.extend(r for r in chase_risks if r not in risks)
     if weak_market:
         score *= 0.85
     if pivot is None:
@@ -3264,6 +3298,8 @@ def analyze_stock(query, provider="auto"):
             momentum += 3; mom_notes.append("接近 60 日高点")
         if b20 > 15:
             momentum -= 4; risks.append(f"偏离 20 日线 {b20:.1f}%，追高风险")
+        elif b20 > 10:
+            momentum -= 2; risks.append(f"偏离 20 日线 {b20:.1f}%，回测 5 日平均跑输大盘")
         elif -3 <= b20 <= 6:
             momentum += 3
     component("动量与位置", momentum, 15, "，".join(mom_notes) or "—")
@@ -3275,6 +3311,9 @@ def analyze_stock(query, provider="auto"):
     if ratio is not None:
         if 1.2 <= ratio <= 3 and change > 0:
             volume += 8; vol_notes.append(f"放量上涨（成交额为 5 日均值 {ratio:.1f} 倍）")
+        elif ratio >= 5 and change > 0:
+            vol_notes.append(f"巨量（{ratio:.1f} 倍），分歧大")
+            risks.append("巨量上涨：回测 5 日平均跑输大盘约 1.5%，不宜追")
         elif ratio > 3 and change > 0:
             volume += 4; vol_notes.append(f"巨量（{ratio:.1f} 倍），分歧大")
         elif ratio > 1.5 and change < 0:

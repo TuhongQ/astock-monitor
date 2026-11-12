@@ -288,6 +288,7 @@ enum AnalysisEngine {
             if s.raw["brk20"] == 1 { momentum += 5; momNotes.append("突破 20 日高点") }
             else if (s.raw["toHigh60"] ?? -99) > -5 { momentum += 3; momNotes.append("接近 60 日高点") }
             if b20 > 15 { momentum -= 4; risks.append(String(format: "偏离 20 日线 %.1f%%，追高风险", b20)) }
+            else if b20 > 10 { momentum -= 2; risks.append(String(format: "偏离 20 日线 %.1f%%，回测 5 日平均跑输大盘", b20)) }
             else if b20 >= -3 && b20 <= 6 { momentum += 3 }
         }
         add("动量与位置", momentum, 15, momNotes.isEmpty ? "—" : momNotes.joined(separator: "，"), "趋势")
@@ -296,6 +297,7 @@ enum AnalysisEngine {
         var volume = 0.0, volNotes: [String] = []
         if let ratio = sw?.amountRatio {
             if ratio >= 1.2 && ratio <= 3 && change > 0 { volume += 8; volNotes.append(String(format: "放量上涨（%.1f 倍）", ratio)) }
+            else if ratio >= 5 && change > 0 { volNotes.append(String(format: "巨量（%.1f 倍），分歧大", ratio)); risks.append("巨量上涨：回测 5 日平均跑输大盘约 1.5%，不宜追") }
             else if ratio > 3 && change > 0 { volume += 4; volNotes.append(String(format: "巨量（%.1f 倍），分歧大", ratio)) }
             else if ratio > 1.5 && change < 0 { volume -= 2; volNotes.append(String(format: "放量下跌（%.1f 倍）", ratio)); risks.append("放量下跌，资金在离场") }
             else if ratio < 0.8 { volume += change >= 0 ? 3 : 4; volNotes.append(String(format: "缩量（%.1f 倍）", ratio)) }
