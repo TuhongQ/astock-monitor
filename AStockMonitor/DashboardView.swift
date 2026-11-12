@@ -551,6 +551,7 @@ struct DashboardView: View {
                         case 1: alertTable
                         case 2: recommendationTable
                         case 3: StockAnalysisPage(store: store)
+                        case 4: HoldingsPage(store: store)
                         default:
                             quoteToolbar
                             Divider()
@@ -623,6 +624,7 @@ struct DashboardView: View {
             Button("") { selectedTab = 1 }.keyboardShortcut("2", modifiers: .command)
             Button("") { selectedTab = 2 }.keyboardShortcut("3", modifiers: .command)
             Button("") { selectedTab = 3 }.keyboardShortcut("4", modifiers: .command)
+            Button("") { selectedTab = 4 }.keyboardShortcut("5", modifiers: .command)
             Button("") { selectedTab = 0; searchFocused = true }.keyboardShortcut("f", modifiers: .command)
             Button("") { store.refresh(); if selectedTab == 2 { store.refreshPotential(force: true) } }.keyboardShortcut("r", modifiers: .command)
             Button("") { withAnimation(.easeInOut(duration: 0.2)) { showSidebar.toggle() } }.keyboardShortcut("l", modifiers: .command)
@@ -679,6 +681,8 @@ struct DashboardView: View {
             tabButton(1, title: "告警", icon: "bell", badge: store.unseenAlertCount > 0 ? min(store.unseenAlertCount, 99) : nil)
             tabButton(2, title: "潜力股", icon: "scope", badge: store.potentialStocks(for: "all").isEmpty ? nil : store.potentialStocks(for: "all").count, badgeColor: .orange)
             tabButton(3, title: "个股分析", icon: "stethoscope", badge: nil)
+            tabButton(4, title: "持仓", icon: "briefcase", badge: store.pendingSellSignals.isEmpty ? (store.holdings.isEmpty ? nil : store.holdings.count) : store.pendingSellSignals.count,
+                      badgeColor: store.pendingSellSignals.isEmpty ? .blue : .orange)
         }
         .padding(2)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
@@ -3696,3 +3700,231 @@ struct AnalysisQuotePanel: View {
     }
 }
 
+// MARK: - 持仓卖点
+
+struct HoldingsPage: View {
+    @ObservedObject var store: MonitorStore
+    @State private var codeInput = ""
+    @State private var costInput = ""
+    @State private var sharesInput = ""
+    @State private var buyDate = Date()
+    @State private var style = "short"
+    @State private var formError: String?
+    @State private var editing: Holding?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            addForm
+            Divider()
+            if store.holdings.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "briefcase").font(.system(size: 34)).foregroundStyle(.secondary)
+                    Text("录入已买入的股票，盘中每轮行情刷新都会检查卖点").font(.headline)
+                    Text("止损 · 到达止盈 · 高点回落（移动止盈）· 涨停打开 · 冲高回落 · 持有到期\n触发后弹出置顶提醒窗口并响铃；同一信号每天只提醒一次。")
+                        .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(store.holdings) { h in row(h) }
+                    }
+                    .padding(12)
+                    signalLog
+                }
+            }
+        }
+        .sheet(item: $editing) { h in HoldingEditor(holding: h) { updated in
+            if let i = store.holdings.firstIndex(where: { $0.id == updated.id }) { store.holdings[i] = updated }
+            editing = nil
+        } cancel: { editing = nil } }
+    }
+
+    private var addForm: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("代码或名称", text: $codeInput).frame(width: 120)
+                TextField("成本价", text: $costInput).frame(width: 80)
+                TextField("股数（可选）", text: $sharesInput).frame(width: 90)
+                DatePicker("买入", selection: $buyDate, in: ...Date(), displayedComponents: .date).labelsHidden().frame(width: 110)
+                Picker("风格", selection: $style) {
+                    ForEach(Holding.styles, id: \.id) { Text($0.title).tag($0.id) }
+                }
+                .labelsHidden().frame(width: 120)
+                Button("加入持仓") { add() }.buttonStyle(.borderedProminent)
+                Spacer()
+                Toggle("卖点弹窗", isOn: $store.sellAlertsEnabled).toggleStyle(.switch).controlSize(.small)
+                if !store.pendingSellSignals.isEmpty {
+                    Button("查看 \(store.pendingSellSignals.count) 条提醒") { SellAlertPanelController.shared.show(store: store) }
+                }
+            }
+            HStack(spacing: 6) {
+                Text(Holding.styles.first { $0.id == style }?.hint ?? "").font(.caption).foregroundStyle(.secondary)
+                if let formError { Text(formError).font(.caption).foregroundStyle(.red) }
+            }
+        }
+        .textFieldStyle(.roundedBorder)
+        .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+
+    private func add() {
+        let raw = codeInput.trimmingCharacters(in: .whitespaces)
+        let code: String?
+        if raw.count == 6, raw.allSatisfy(\.isNumber) { code = raw }
+        else { code = store.quotes.first { $0.name == raw }?.code ?? store.quotes.first { $0.name.contains(raw) && !raw.isEmpty }?.code }
+        guard let code, store.quote(for: code) != nil else { formError = "找不到这只股票"; return }
+        guard let cost = Double(costInput), cost > 0 else { formError = "请填写成本价"; return }
+        formError = nil
+        store.addHolding(code: code, cost: cost, shares: Int(sharesInput), buyDate: buyDate, style: style)
+        codeInput = ""; costInput = ""; sharesInput = ""
+    }
+
+    private func row(_ h: Holding) -> some View {
+        let q = store.quote(for: h.code)
+        let price = q?.price ?? h.cost
+        let pnl = (price / h.cost - 1) * 100
+        let pending = store.pendingSellSignals.filter { $0.holdingID == h.id }
+        return HStack(alignment: .center, spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(h.name).font(.headline)
+                    Text(Holding.styleTitle(h.style)).font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                }
+                Text("\(h.code) · \(h.buyDate.formatted(.dateTime.month().day())) 买入 · 持有 \(store.tradingDaysHeld(h)) 个交易日")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(width: 220, alignment: .leading)
+            metric("成本", String(format: "%.2f", h.cost))
+            metric("现价", String(format: "%.2f", price), color: (q?.changePercent ?? 0) >= 0 ? .red : .green)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("盈亏").font(.caption2).foregroundStyle(.secondary)
+                Text(String(format: "%+.2f%%", pnl)).font(.system(size: 15, weight: .semibold)).monospacedDigit().foregroundStyle(pnl >= 0 ? .red : .green)
+                if let shares = h.shares { Text(String(format: "%+.0f 元", (price - h.cost) * Double(shares))).font(.caption2).foregroundStyle(.secondary) }
+            }
+            .frame(width: 80, alignment: .leading)
+            metric("买入后最高", String(format: "%.2f (%+.1f%%)", h.peakPrice, h.peakGain))
+            ladder(h, price: price)
+            Spacer(minLength: 0)
+            VStack(alignment: .trailing, spacing: 4) {
+                if let s = pending.first {
+                    Button { SellAlertPanelController.shared.show(store: store) } label: {
+                        Label(s.title, systemImage: "exclamationmark.triangle.fill").font(.caption.bold())
+                    }
+                    .buttonStyle(.borderedProminent).tint(s.critical ? .green : .red).controlSize(.small)
+                } else {
+                    Text(statusText(h, price: price)).font(.caption).foregroundStyle(.secondary)
+                }
+                HStack(spacing: 6) {
+                    Button("修改") { editing = h }.controlSize(.small)
+                    Button("分析") { store.analyze(h.code) }.controlSize(.small).help("在「个股分析」页查看（⌘4）")
+                    Button("已卖出") { store.removeHolding(h.id) }.controlSize(.small)
+                }
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(pending.isEmpty ? Color.primary.opacity(0.04) : Color.orange.opacity(0.10)))
+    }
+
+    private func metric(_ title: String, _ value: String, color: Color = .primary) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 13, weight: .medium)).monospacedDigit().foregroundStyle(color)
+        }
+        .fixedSize()
+    }
+
+    /// 止损 —— 现价 —— 止盈 的位置条，移动止盈线启动后以橙色竖线标出。
+    private func ladder(_ h: Holding, price: Double) -> some View {
+        let low = min(h.stopPrice, price) * 0.995, high = max(h.targetPrice, price, h.peakPrice) * 1.005
+        func x(_ v: Double, _ w: CGFloat) -> CGFloat { CGFloat((v - low) / (high - low)) * w }
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(String(format: "止损 %.2f", h.stopPrice)).foregroundStyle(.green)
+                Spacer()
+                if let line = h.trailLine { Text(String(format: "移动止盈 %.2f", line)).foregroundStyle(.orange) }
+                Spacer()
+                Text(String(format: "止盈 %.2f", h.targetPrice)).foregroundStyle(.red)
+            }
+            .font(.caption2).monospacedDigit()
+            GeometryReader { geo in
+                let w = geo.size.width
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.primary.opacity(0.08)).frame(height: 6)
+                    Rectangle().fill(Color.green).frame(width: 2, height: 12).offset(x: x(h.stopPrice, w) - 1)
+                    Rectangle().fill(Color.secondary).frame(width: 1, height: 12).offset(x: x(h.cost, w))
+                    Rectangle().fill(Color.red).frame(width: 2, height: 12).offset(x: x(h.targetPrice, w) - 1)
+                    if let line = h.trailLine { Rectangle().fill(Color.orange).frame(width: 2, height: 12).offset(x: x(line, w) - 1) }
+                    Circle().fill(price >= h.cost ? Color.red : Color.green).frame(width: 10, height: 10).offset(x: x(price, w) - 5)
+                }
+                .frame(height: 12)
+            }
+            .frame(height: 12)
+        }
+        .frame(minWidth: 180, maxWidth: 260)
+    }
+
+    private func statusText(_ h: Holding, price: Double) -> String {
+        let toStop = (price / h.stopPrice - 1) * 100, toTarget = (h.targetPrice / price - 1) * 100
+        if let line = h.trailLine { return String(format: "移动止盈已启动，距止盈线 %.1f%%", (price / line - 1) * 100) }
+        return String(format: "距止损 %.1f%% · 距止盈 %.1f%%", toStop, max(toTarget, 0))
+    }
+
+    private var signalLog: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if !store.sellSignals.isEmpty {
+                HStack {
+                    Text("提醒记录").font(.headline)
+                    Spacer()
+                    Button("清空记录") { store.sellSignals.removeAll() }.controlSize(.small)
+                }
+                ForEach(store.sellSignals.prefix(60)) { s in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(s.time.formatted(.dateTime.month(.twoDigits).day(.twoDigits).hour().minute())).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 90, alignment: .leading)
+                        Text(s.title).font(.caption.bold()).foregroundStyle(s.critical ? .green : .red).frame(width: 64, alignment: .leading)
+                        Text(s.name).font(.caption).frame(width: 70, alignment: .leading)
+                        Text(s.detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        Spacer(minLength: 0)
+                        if !s.acknowledged { Text("待处理").font(.caption2).foregroundStyle(.orange) }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12).padding(.bottom, 12)
+    }
+}
+
+/// 修改单笔持仓的卖出参数。
+private struct HoldingEditor: View {
+    @State var holding: Holding
+    let save: (Holding) -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("修改 \(holding.name)（\(holding.code)）").font(.headline)
+            Form {
+                TextField("成本价", value: $holding.cost, format: .number.precision(.fractionLength(2)))
+                TextField("股数", value: $holding.shares, format: .number)
+                DatePicker("买入日期", selection: $holding.buyDate, in: ...Date(), displayedComponents: .date)
+                Picker("风格", selection: $holding.style) { ForEach(Holding.styles, id: \.id) { Text($0.title).tag($0.id) } }
+                TextField("止损价", value: $holding.stopPrice, format: .number.precision(.fractionLength(2)))
+                TextField("止盈价", value: $holding.targetPrice, format: .number.precision(.fractionLength(2)))
+                TextField("盈利多少 % 后启动移动止盈", value: $holding.trailActivate, format: .number)
+                TextField("从最高价回落多少 % 提醒", value: $holding.trailDrawdown, format: .number)
+                TextField("买入后最高价", value: $holding.peakPrice, format: .number.precision(.fractionLength(2)))
+            }
+            HStack {
+                Button("按风格重置参数") {
+                    let d = Holding.make(code: holding.code, name: holding.name, cost: holding.cost, shares: holding.shares, buyDate: holding.buyDate, style: holding.style)
+                    holding.stopPrice = d.stopPrice; holding.targetPrice = d.targetPrice
+                    holding.trailActivate = d.trailActivate; holding.trailDrawdown = d.trailDrawdown
+                }
+                Spacer()
+                Button("取消", action: cancel).keyboardShortcut(.cancelAction)
+                Button("保存") { save(holding) }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(16).frame(width: 380)
+    }
+}

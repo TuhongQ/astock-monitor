@@ -301,3 +301,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store?.stop()
     }
 }
+
+// MARK: - 卖点提醒弹窗
+
+/// 置顶浮动面板：在其他 App 前面弹出，所有桌面空间可见，直到逐条确认或全部确认。
+@MainActor final class SellAlertPanelController {
+    static let shared = SellAlertPanelController()
+    private var panel: NSPanel?
+
+    func show(store: MonitorStore) {
+        if panel == nil {
+            let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 320),
+                            styleMask: [.titled, .closable, .resizable, .utilityWindow, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
+            p.title = "卖点提醒"
+            p.level = .floating
+            p.isFloatingPanel = true
+            p.hidesOnDeactivate = false
+            p.isReleasedWhenClosed = false
+            p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            p.contentView = NSHostingView(rootView: SellAlertPanelView(store: store, close: { [weak self] in self?.close() }))
+            if let screen = NSScreen.main?.visibleFrame {
+                p.setFrameTopLeftPoint(NSPoint(x: screen.maxX - 440, y: screen.maxY - 20))
+            }
+            panel = p
+        }
+        panel?.orderFrontRegardless()
+    }
+
+    func close() { panel?.orderOut(nil) }
+}
+
+private struct SellAlertPanelView: View {
+    @ObservedObject var store: MonitorStore
+    let close: () -> Void
+
+    var body: some View {
+        let pending = store.pendingSellSignals
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "bell.badge.fill").foregroundStyle(.orange)
+                Text(pending.isEmpty ? "没有待处理的卖点提醒" : "\(pending.count) 条卖点提醒").font(.headline)
+                Spacer()
+                if !pending.isEmpty {
+                    Button("全部知道了") { store.acknowledgeAllSellSignals(); close() }.controlSize(.small)
+                }
+            }
+            ScrollView {
+                VStack(spacing: 8) {
+                    ForEach(pending) { signal in card(signal) }
+                }
+            }
+            Text("规则提醒仅供参考，是否卖出由你决定。").font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(minWidth: 380, minHeight: 200)
+        .onChange(of: pending.isEmpty) { empty in if empty { close() } }
+    }
+
+    private func card(_ s: SellSignal) -> some View {
+        let color: Color = s.critical ? .green : .red
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Text(s.title).font(.caption.bold()).foregroundStyle(.white)
+                    .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(color))
+                Text(s.name).font(.headline)
+                Text(s.code).font(.caption.monospaced()).foregroundStyle(.secondary)
+                Spacer()
+                Text(String(format: "%+.2f%%", s.pnl)).font(.headline.monospacedDigit()).foregroundStyle(s.pnl >= 0 ? .red : .green)
+            }
+            Text(s.detail).font(.callout).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Text(s.time.formatted(date: .omitted, time: .standard)).font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Button("已卖出，移出持仓") { store.removeHolding(s.holdingID); store.acknowledgeSellSignal(s.id) }.controlSize(.small)
+                Button("知道了") { store.acknowledgeSellSignal(s.id) }.controlSize(.small).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(color.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(0.35)))
+    }
+}

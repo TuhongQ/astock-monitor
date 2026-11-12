@@ -13,6 +13,12 @@ import AppKit
     @Published var alerts: [AlertRecord] = AppFiles.read([AlertRecord].self, name: "alerts.json", fallback: []) { didSet { AppFiles.write(alerts, name: "alerts.json") } }
     @Published private(set) var alertLogTradingDays: [Date] = []
     @Published private(set) var alertToast: AlertToast?
+    /// 持仓与卖点提醒（holdings.json / sell-signals.json）。
+    @Published var holdings: [Holding] = AppFiles.read([Holding].self, name: "holdings.json", fallback: []) { didSet { AppFiles.write(holdings, name: "holdings.json") } }
+    @Published var sellSignals: [SellSignal] = AppFiles.read([SellSignal].self, name: "sell-signals.json", fallback: []) { didSet { AppFiles.write(sellSignals, name: "sell-signals.json") } }
+    @Published var sellAlertsEnabled: Bool = UserDefaults.standard.object(forKey: "sellAlertsEnabled") as? Bool ?? true { didSet { UserDefaults.standard.set(sellAlertsEnabled, forKey: "sellAlertsEnabled") } }
+    /// 未处理的卖出提醒，驱动置顶弹窗。
+    var pendingSellSignals: [SellSignal] { sellSignals.filter { !$0.acknowledged } }
     /// Alerts raised since the user last opened the alert log (tab badge).
     @Published private(set) var unseenAlertCount = 0
     @Published var watch: WatchData = AppFiles.read(WatchData.self, name: "watchlist.json", fallback: WatchData()) {
@@ -425,7 +431,9 @@ import AppKit
                     for q in data { ingest(q, at: now) }
                     latestSnapshotTimestamp = snapshotTimestamp
                 }
-                quotes = data; lastUpdate = now; status = "已连接 · \(providerName(provider)) · \(data.count) 只 · 连接用时 \(String(format: "%.2f", connectionElapsed)) s · 更新 \(now.formatted(date: .omitted, time: .standard))"
+                quotes = data; lastUpdate = now
+                checkHoldings(at: now)
+                status = "已连接 · \(providerName(provider)) · \(data.count) 只 · 连接用时 \(String(format: "%.2f", connectionElapsed)) s · 更新 \(now.formatted(date: .omitted, time: .standard))"
                 DebugLog.write("行情连接耗时 id=\(requestID), elapsed=\(String(format: "%.3f", connectionElapsed))s")
                 refreshPotential()
                 let sample = data.prefix(4).map { "\($0.code):\($0.name)=\($0.price)" }.joined(separator: ",")
@@ -1155,5 +1163,140 @@ import AppKit
     func setSort(_ key: String, ascending order: Bool) {
         sortKey = key
         ascending = order
+    }
+}
+
+// MARK: - 持仓卖点监控
+
+extension MonitorStore {
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.timeZone = TimeZone(identifier: "Asia/Shanghai"); return f
+    }()
+    private static var shanghai: Calendar {
+        var c = Calendar(identifier: .gregorian); c.timeZone = TimeZone(identifier: "Asia/Shanghai")!; return c
+    }
+
+    /// 录入持仓：先用默认参数入库，再用个股分析的日线补全买入后最高价、波段止损参考 20 日线。
+    func addHolding(code: String, cost: Double, shares: Int?, buyDate: Date, style: String) {
+        let name = quote(for: code)?.name ?? code
+        var holding = Holding.make(code: code, name: name, cost: cost, shares: shares, buyDate: buyDate, style: style)
+        if let q = quote(for: code) {
+            let today = Self.dayFormatter.string(from: Date())
+            let bought = Self.dayFormatter.string(from: buyDate)
+            holding.peakPrice = max(cost, bought == today ? q.price : (q.high ?? q.price))
+        }
+        holdings.append(holding)
+        DebugLog.write("新增持仓 code=\(code), cost=\(cost), style=\(style), stop=\(holding.stopPrice), target=\(holding.targetPrice)")
+        let id = holding.id
+        Task {
+            guard let r = try? await service.fetchAnalysis(query: code, provider: provider), r.error == nil,
+                  let index = holdings.firstIndex(where: { $0.id == id }) else { return }
+            var h = holdings[index]
+            if let n = r.name { h.name = n }
+            let bought = Self.dayFormatter.string(from: h.buyDate)
+            let after = (r.daily ?? []).filter { $0.date > bought }.map(\.high)
+            if let high = after.max() { h.peakPrice = max(h.peakPrice, high) }
+            if style == "swing", let ma20 = r.levels?.first(where: { $0.note == "MA20" })?.price, ma20 < h.cost {
+                // 波段：止损取「−8%」与「跌破 20 日线 2%」中更近的一个。
+                h.stopPrice = max(h.stopPrice, (ma20 * 0.98 * 100).rounded() / 100)
+            }
+            holdings[index] = h
+            checkHoldings(at: Date())
+        }
+    }
+
+    func removeHolding(_ id: UUID) {
+        holdings.removeAll { $0.id == id }
+        for i in sellSignals.indices where sellSignals[i].holdingID == id { sellSignals[i].acknowledged = true }
+    }
+
+    func acknowledgeSellSignal(_ id: UUID) {
+        if let i = sellSignals.firstIndex(where: { $0.id == id }) { sellSignals[i].acknowledged = true }
+    }
+    func acknowledgeAllSellSignals() {
+        for i in sellSignals.indices where !sellSignals[i].acknowledged { sellSignals[i].acknowledged = true }
+    }
+
+    /// 自然日里的交易日数（只扣周末，节假日不计）。
+    func tradingDaysHeld(_ h: Holding, now: Date = Date()) -> Int {
+        let cal = Self.shanghai
+        var day = cal.startOfDay(for: h.buyDate), end = cal.startOfDay(for: now), n = 0
+        while day < end {
+            day = cal.date(byAdding: .day, value: 1, to: day)!
+            let wd = cal.component(.weekday, from: day)
+            if wd != 1 && wd != 7 { n += 1 }
+        }
+        return n
+    }
+
+    /// 每轮行情刷新后检查全部持仓。只在交易日 9:30–15:00 且行情是当天的才判断，避免收盘后或周末用旧价误报。
+    func checkHoldings(at now: Date) {
+        guard !holdings.isEmpty else { return }
+        let cal = Self.shanghai
+        let today = Self.dayFormatter.string(from: now)
+        let minutes = cal.component(.hour, from: now) * 60 + cal.component(.minute, from: now)
+        let weekday = cal.component(.weekday, from: now)
+        let session = weekday != 1 && weekday != 7 && minutes >= 9 * 60 + 30 && minutes <= 15 * 60
+        var changed = holdings
+        var newSignals: [SellSignal] = []
+        for i in changed.indices {
+            var h = changed[i]
+            guard let q = quote(for: h.code), q.price > 0, !q.suspended else { continue }
+            if Self.dayFormatter.string(from: q.timestamp) != today { continue }
+            let boughtToday = Self.dayFormatter.string(from: h.buyDate) == today
+            // 当天买入的不用盘中更早的高点，避免把买入前的价格算进「买入后最高」。
+            h.peakPrice = max(h.peakPrice, boughtToday ? q.price : (q.high ?? q.price))
+            if q.upperLimit { h.sealedDay = today }
+            let pnl = (q.price / h.cost - 1) * 100
+            func fire(_ kind: String, _ title: String, _ detail: String, critical: Bool) {
+                let key = "\(today)|\(kind)"
+                guard session, !h.fired.contains(key) else { return }
+                h.fired.append(key)
+                newSignals.append(SellSignal(holdingID: h.id, code: h.code, name: h.name, kind: kind, title: title, detail: detail,
+                                             price: q.price, pnl: pnl, time: now, critical: critical))
+            }
+            let held = tradingDaysHeld(h, now: now)
+            if q.lowerLimit {
+                fire("limitDown", "封跌停", String(format: "封跌停 ¥%.2f，盈亏 %+.2f%%。跌停可能连续，打开时优先离场。", q.price, pnl), critical: true)
+            } else if q.price <= h.stopPrice {
+                fire("stop", "止损", String(format: "现价 ¥%.2f 跌破止损位 ¥%.2f（成本 ¥%.2f，盈亏 %+.2f%%）。按计划止损，不要补仓摊平。", q.price, h.stopPrice, h.cost, pnl), critical: true)
+            }
+            if let line = h.trailLine, q.price <= line, q.price > h.stopPrice {
+                let back = (1 - q.price / h.peakPrice) * 100
+                let protect = line <= h.cost * 1.0031
+                fire("trail", protect ? "保本卖出" : "高点回落",
+                     String(format: "买入后最高 ¥%.2f（%+.1f%%），现价 ¥%.2f 回落 %.1f%%，%@。现盈亏 %+.2f%%。", h.peakPrice, h.peakGain, q.price, back,
+                            protect ? "利润已回吐到成本附近，保本离场" : "跌破移动止盈线，锁定利润", pnl), critical: false)
+            }
+            if q.price >= h.targetPrice {
+                fire("target", "到达止盈", String(format: "现价 ¥%.2f 达到止盈目标 ¥%.2f，盈利 %+.2f%%。可卖出，或先卖一半、剩余用移动止盈保护。", q.price, h.targetPrice, pnl), critical: false)
+            }
+            if h.sealedDay == today, !q.upperLimit, let limit = q.limitUpPrice, q.price < limit * 0.99 {
+                fire("limitOpen", "涨停打开", String(format: "盘中封过涨停 ¥%.2f，现已打开到 ¥%.2f。炸板后当日回落概率大，可先卖出锁定利润（盈亏 %+.2f%%）。", limit, q.price, pnl), critical: false)
+            }
+            if let prev = q.prevClose, prev > 0, let high = q.high, !boughtToday, pnl > 0,
+               (high / prev - 1) * 100 >= 5, (high - q.price) / prev * 100 >= 4 {
+                fire("fade", "冲高回落", String(format: "今日最高 %+.1f%%，现回落到 %+.1f%%，抛压明显。持仓盈利 %+.2f%%，考虑先减仓。", (high / prev - 1) * 100, q.changePercent, pnl), critical: false)
+            }
+            if minutes >= 14 * 60 + 30 {
+                if h.style == "overnight", held >= 1 {
+                    fire("expire", "隔夜单到期", String(format: "尾盘隔夜单的计划是次日卖出，今天还没触发止盈。收盘前处理，现盈亏 %+.2f%%。", pnl), critical: false)
+                } else if h.style == "short", held >= 3 {
+                    fire("expire", "持有到期", String(format: "短线单已持有 %d 个交易日（回测最优持有期 3 天），现盈亏 %+.2f%%。继续拿的期望不再更高，考虑收盘前离场。", held, pnl), critical: false)
+                } else if h.style == "swing", held >= 10 {
+                    fire("expire", "波段到期", String(format: "波段单已持有 %d 个交易日，现盈亏 %+.2f%%。回测里持有超过 10 天收益反而下降，请复核是否继续持有。", held, pnl), critical: false)
+                }
+            }
+            changed[i] = h
+        }
+        if changed != holdings { holdings = changed }
+        guard !newSignals.isEmpty else { return }
+        sellSignals.insert(contentsOf: newSignals.reversed(), at: 0)
+        if sellSignals.count > 500 { sellSignals.removeLast(sellSignals.count - 500) }
+        for s in newSignals { DebugLog.write("卖点提醒 \(s.kind) code=\(s.code), price=\(s.price), pnl=\(String(format: "%.2f", s.pnl))") }
+        guard sellAlertsEnabled else { return }
+        NSSound(named: .init(newSignals.contains(where: \.critical) ? "Sosumi" : "Glass"))?.play()
+        NSApp.requestUserAttention(newSignals.contains(where: \.critical) ? .criticalRequest : .informationalRequest)
+        SellAlertPanelController.shared.show(store: self)
     }
 }
