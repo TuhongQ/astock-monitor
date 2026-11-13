@@ -1075,8 +1075,8 @@ STRATEGY_META = [
      "summary": "14:30 后温和放量、收在高位的稳健个股",
      "description": "经典尾盘选股：涨幅 2.5%–6%、量比 ≥ 1.2、换手 3%–12%、流通市值 30–300 亿、收在日内高位，且午后 5 分钟线稳步走高、日线 5 日线在 10 日线上方、近 20 日涨幅不大。14:30 前显示的是预览结果。"},
     {"id": "overnight", "title": "尾盘隔夜", "icon": "sunrise.fill",
-     "summary": "14:50 买入、次日冲高卖出：主板 / 创业科创各选次日大涨概率最高的 10 只",
-     "description": "全市场（剔除 ST、北交所、停牌、涨停封死、跌停、成交额 < 5000 万）逐只估算「次日盘中最高价比现价高 3% / 5%」的概率。模型用 1490 只随机个股 2026 年以来约 16.5 万个交易日拟合，并做了样本外检验：入选前 10 只次日冲高 ≥5% 的实际比例约 33%（全市场约 12%），≥3% 约 49%（全市场约 25%）。最有效的因子是换手、振幅、成交额和上影线（盘中资金活跃），量比过大、尾盘追高（高于分时均价）反而减分。注意：这类股票次日开盘平均低开约 1%，开盘直接卖出期望为负；建议次日挂 +3% 止盈单，10:30 前未成交或跌破 −3% 止损就卖出。14:50 自动锁定当日推荐，此前为预览；排序每 12 秒随行情刷新。"},
+     "summary": "高风险：14:50 买入、次日冲高卖出；回测平均每笔小亏，只适合小仓位",
+     "description": "全市场（剔除 ST、北交所、停牌、涨停封死、跌停、成交额 < 5000 万）逐只估算「次日盘中最高价比现价高 3% / 5%」的概率。模型用 1490 只随机个股 2026 年以来约 16.5 万个交易日拟合，并做了样本外检验：入选前 10 只次日冲高 ≥5% 的实际比例约 33%（全市场约 12%），≥3% 约 49%（全市场约 25%）。最有效的因子是换手、振幅、成交额和上影线（盘中资金活跃），量比过大、尾盘追高（高于分时均价）反而减分。注意：这类股票次日开盘平均低开约 1%，开盘直接卖出期望为负；建议次日挂 +3% 止盈单，10:30 前未成交或跌破 −5% 止损就卖出。14:50 自动锁定当日推荐，此前为预览；排序每 12 秒随行情刷新。⚠️ 2026-11-13 全市场复盘（5252 只、14 个月）：这类高波动候选次日不论怎么设止盈止损，平均每笔约亏 0.4%–0.6%（含 0.15% 成本），14 个月几乎每月为负——它只提高「冲高」概率，不提高收益，只适合小仓位试错。已剔除回测更差的几类：20 日涨 ≥50% 或 5 日涨 ≥35%、盘中触及涨停后炸板、振幅 ≥10% 却收平、量比 ≥3。"},
 ]
 STRATEGY_TITLES = {item["id"]: item["title"] for item in STRATEGY_META}
 
@@ -2574,11 +2574,18 @@ def strategy_overnight(ctx):
         limit_up = q.get("limitUpPrice")
         if limit_up and price >= limit_up - 0.011:
             continue
+        # Full-market backtest 2026-11-13: these lose more and gap down >=5% 5-7% of the time.
+        if limit_up and (q.get("high") or 0) >= limit_up - 0.011:
+            continue  # 炸板
+        if (q.get("volumeRatio") or 0) >= 3:
+            continue
         computed = overnight_features(q, now)
         if not computed:
             continue
         raw, info = computed
         if info["fullAmount"] < 5e7:
+            continue
+        if info["amplitude"] >= 10 and abs(q.get("changePercent") or 0) < 2:
             continue
         p3, p5, gap = overnight_scores(raw)
         rank = p5 + 0.1 * gap
@@ -2613,7 +2620,8 @@ def strategy_overnight(ctx):
                 signals.append(f"上影 {raw['upper']:.1f}%：盘中资金试过拉升，次日再冲概率更高")
             if raw["vwapDev"] <= 0:
                 signals.append("现价在分时均价线下方，没有尾盘追高")
-            risks = ["高波动股次日开盘平均低开约 1%：不要开盘市价卖，挂止盈单等冲高"]
+            risks = ["全市场回测：这类股票次日平均每笔小亏，冲高概率高≠赚钱，只用小仓位",
+                     "高波动股次日开盘平均低开约 1%：不要开盘市价卖，挂止盈单等冲高"]
             if raw["vwapDev"] > 1.5:
                 risks.append(f"高于分时均价 {raw['vwapDev']:.1f}%，尾盘追高，次日低开概率大")
             if raw["pos"] > 0.9 and change > 3:

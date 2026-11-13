@@ -250,8 +250,8 @@ enum QuantEngine {
                      description: "按中位涨幅、前五强均值和涨停家数给东财行业打热度，取最热的 6 个行业；在板块内按涨幅、成交额、是否涨停及封板早晚、盘中涨速挑出前两名。"),
         StrategyMeta(id: "tail", title: "尾盘潜伏", icon: "moon.stars.fill", summary: "14:30 后温和放量、收在高位",
                      description: "涨 2.5%–6%、量比 ≥ 1.2、换手 3%–12%、流通 30–300 亿、收在日内高位，午后 5 分钟线稳步走高、日线短均线多头、近 20 日涨幅不大。14:30 前为预览。"),
-        StrategyMeta(id: "overnight", title: "尾盘隔夜", icon: "sunrise.fill", summary: "14:50 买入、次日冲高卖出，主板 / 创业科创各 10 只",
-                     description: "全市场（剔除 ST、北交所、停牌、涨停封死、跌停、成交额 < 5000 万）逐只估算「次日盘中最高价比现价高 3% / 5%」的概率。模型用 1490 只随机个股 2026 年以来约 16.5 万个交易日拟合并做样本外检验：入选前 10 只次日冲高 ≥5% 的实际比例约 33%（全市场约 12%），≥3% 约 49%（全市场约 25%）。换手、振幅、成交额、上影线加分，量比过大和尾盘追高（高于分时均价）减分。这类股票次日开盘平均低开约 1%，开盘直接卖期望为负：建议次日挂 +3% 止盈单，10:30 前未成交或跌破 −3% 就卖出。14:50 自动锁定，此前为预览。不并入「综合」。"),
+        StrategyMeta(id: "overnight", title: "尾盘隔夜", icon: "sunrise.fill", summary: "高风险：14:50 买入、次日冲高卖出；回测平均每笔小亏",
+                     description: "全市场（剔除 ST、北交所、停牌、涨停封死、跌停、成交额 < 5000 万）逐只估算「次日盘中最高价比现价高 3% / 5%」的概率。模型用 1490 只随机个股 2026 年以来约 16.5 万个交易日拟合并做样本外检验：入选前 10 只次日冲高 ≥5% 的实际比例约 33%（全市场约 12%），≥3% 约 49%（全市场约 25%）。换手、振幅、成交额、上影线加分，量比过大和尾盘追高（高于分时均价）减分。这类股票次日开盘平均低开约 1%，开盘直接卖期望为负：建议次日挂 +3% 止盈单，10:30 前未成交或跌破 −5% 就卖出。14:50 自动锁定，此前为预览。不并入「综合」。⚠️ 2026-11-13 全市场复盘（5252 只、14 个月）：这类高波动候选次日不论怎么设止盈止损，平均每笔约亏 0.4%–0.6%（含 0.15% 成本），14 个月几乎每月为负——它只提高「冲高」概率，不提高收益，只适合小仓位试错。已剔除回测更差的几类：20 日涨 ≥50% 或 5 日涨 ≥35%、盘中触及涨停后炸板、振幅 ≥10% 却收平、量比 ≥3。"),
     ]
     static let titles = Dictionary(uniqueKeysWithValues: strategies.map { ($0.id, $0.title) })
 
@@ -796,7 +796,11 @@ enum QuantEngine {
         for q in ctx.quotes {
             guard !q.suspended, !q.upperLimit, !q.lowerLimit, q.price >= 2, tradeable(q) else { continue }
             if let up = q.limitUpPrice, q.price >= up - 0.011 { continue }
+            // Full-market backtest 2026-11-13: 炸板, 量比 >=3 and wide-range-but-flat days lose more.
+            if q.openedLimit { continue }
+            if (q.volumeRatio ?? 0) >= 3 { continue }
             guard let snap = overnightSnapshot(q, fraction: fraction), snap.fullAmount >= 5e7 else { continue }
+            if snap.amp >= 10 && abs(q.changePercent) < 2 { continue }
             let (p3, p5, gap, raw, amp, turnover, fullAmount) = (snap.p3, snap.p5, snap.gap, snap.raw, snap.amp, snap.turnover, snap.fullAmount)
             let board = WatchData.pickBoard(code: q.code)
             byBoard[board, default: []].append((p5 + 0.1 * gap, p3, p5, gap, raw, amp, turnover, fullAmount, q))
@@ -821,7 +825,8 @@ enum QuantEngine {
                                 + (e.turnover.map { String(format: "、换手 %.1f%%", $0) } ?? "") + "、成交 \(Fmt.yuan(e.amount))（全天折算）"]
                 if e.raw[2] >= 3 { signals.append(String(format: "上影 %.1f%%：盘中资金试过拉升，次日再冲概率更高", e.raw[2])) }
                 if e.raw[3] <= 0 { signals.append("现价在分时均价线下方，没有尾盘追高") }
-                var risks = ["高波动股次日开盘平均低开约 1%：不要开盘市价卖，挂止盈单等冲高"]
+                var risks = ["全市场回测：这类股票次日平均每笔小亏，冲高概率高≠赚钱，只用小仓位",
+                             "高波动股次日开盘平均低开约 1%：不要开盘市价卖，挂止盈单等冲高"]
                 if e.raw[3] > 1.5 { risks.append(String(format: "高于分时均价 %.1f%%，尾盘追高，次日低开概率大", e.raw[3])) }
                 if e.raw[1] > 0.9 && q.changePercent > 3 { risks.append("收在日内最高附近，回测显示次日开盘更弱") }
                 if e.gap < -0.4 { risks.append("隔夜模型估计其低开幅度在候选中偏大") }
