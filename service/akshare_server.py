@@ -28,7 +28,7 @@ socket.setdefaulttimeout(10)
 
 HOST, PORT, CACHE_SECONDS = "127.0.0.1", 8767, 1.5
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-API_VERSION = 27
+API_VERSION = 28
 INDEX_SYMBOLS = {
     "sh000001": "上证指数", "sz399001": "深证成指",
     "sz399006": "创业板指", "sh000680": "科创综指",
@@ -2405,6 +2405,48 @@ OVERNIGHT_PER_BOARD = 15
 OVERNIGHT_TAKE_PROFIT = 3.0
 OVERNIGHT_STOP = 3.0
 
+# Backtest 2026-11-13 (203 active stocks, one year of daily bars): candidates
+# already up >=50% over 20 days or >=35% over 5 days gapped down >=5% about 10%
+# of the time (vs ~2%) and averaged -1.4% per trade with the +3 / -5 exit,
+# against -0.5% for the rest. They are dropped from the list.
+OVERNIGHT_MAX_RUN20 = 50.0
+OVERNIGHT_MAX_RUN5 = 35.0
+overnight_prefetch_lock = threading.Lock()
+overnight_prefetch_pending: set[str] = set()
+overnight_prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="overnight-daily")
+
+def _overnight_prefetch(codes):
+    with overnight_prefetch_lock:
+        fresh = [code for code in codes if code not in overnight_prefetch_pending]
+        overnight_prefetch_pending.update(fresh)
+    if not fresh:
+        return
+
+    def run():
+        for code in fresh:
+            try:
+                if cached_daily(code) is None:
+                    fetch_daily_rows(code, "year")
+                    time.sleep(POTENTIAL_HISTORY_INTERVAL)
+            except Exception as exc:
+                print(f"Overnight daily prefetch skipped {code}: {exc}", flush=True)
+            finally:
+                with overnight_prefetch_lock:
+                    overnight_prefetch_pending.discard(code)
+        _save_daily_disk_cache()
+    overnight_prefetch_executor.submit(run)
+
+def _overnight_runup(code, price, now):
+    """(20-day %, 5-day %) up to the live price, or None without daily bars."""
+    history = cached_daily(code)
+    if not history:
+        return None
+    today = now.strftime("%Y-%m-%d")
+    bars = [b for b in history if b.get("date") != today]
+    if len(bars) < 20:
+        return None
+    return (price / bars[-20]["close"] - 1) * 100, (price / bars[-5]["close"] - 1) * 100
+
 def _overnight_board(code):
     return "创业科创" if code.startswith(("300", "301", "688", "689")) else "主板"
 
@@ -2542,9 +2584,25 @@ def strategy_overnight(ctx):
         rank = p5 + 0.1 * gap
         by_board[_overnight_board(code)].append((rank, p3, p5, gap, raw, info, q))
     results = []
+    missing = []
     for board, entries in by_board.items():
         entries.sort(key=lambda entry: entry[0], reverse=True)
-        for position, (rank, p3, p5, gap, raw, info, q) in enumerate(entries[:OVERNIGHT_PER_BOARD], start=1):
+        kept = []
+        for entry in entries[:OVERNIGHT_PER_BOARD * 3]:
+            q = entry[6]
+            runup = _overnight_runup(q["code"], q["price"], now)
+            if runup is None:
+                missing.append(q["code"])
+            elif runup[0] >= OVERNIGHT_MAX_RUN20 or runup[1] >= OVERNIGHT_MAX_RUN5:
+                continue
+            kept.append(entry + (runup,))
+            if len(kept) >= OVERNIGHT_PER_BOARD:
+                break
+        by_board[board] = kept
+    if missing:
+        _overnight_prefetch(missing)
+    for board, entries in by_board.items():
+        for position, (rank, p3, p5, gap, raw, info, q, runup) in enumerate(entries, start=1):
             price, change = q["price"], q.get("changePercent", 0)
             score = 100 * (0.5 * min(p3 / 0.6, 1) + 0.5 * min(p5 / 0.4, 1))
             amplitude, turnover = info["amplitude"], info["turnover"]
@@ -2562,6 +2620,10 @@ def strategy_overnight(ctx):
                 risks.append("收在日内最高附近，回测显示次日开盘更弱")
             if gap < -0.4:
                 risks.append("隔夜模型估计其低开幅度在候选中偏大")
+            if runup is None:
+                risks.append("近 20 日涨幅还未核验（日线加载中）：前期已大涨的股票次日跌停风险高，买前自己看一眼 K 线")
+            elif runup[0] >= 30:
+                risks.append(f"近 20 日已涨 {runup[0]:.0f}%，次日大幅低开的概率偏高")
             if ctx["weak"]:
                 risks.append("今日市场弱势")
             take_profit = _round_price(price * (1 + OVERNIGHT_TAKE_PROFIT / 100))

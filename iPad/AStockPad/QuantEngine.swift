@@ -766,6 +766,28 @@ enum QuantEngine {
                                  gap: dot(overnightWGap), raw: raw, amp: amp, turnover: turnover, fullAmount: fullAmount, vwap: vwap)
     }
 
+    /// (20-day %, 5-day %) up to the live price, nil until daily bars are cached.
+    static func overnightRunup(_ ctx: QuantContext, _ q: Quote) -> (Double, Double)? {
+        guard let candles = ctx.daily[q.code] else { return nil }
+        let today = Market.dayKey(ctx.now)
+        let bars = candles.filter { $0.date != today }
+        guard bars.count >= 20, q.price > 0 else { return nil }
+        return ((q.price / bars[bars.count - 20].close - 1) * 100, (q.price / bars[bars.count - 5].close - 1) * 100)
+    }
+
+    /// Codes the overnight list may draw from, so the daily-bar scan can prefetch them.
+    static func overnightPool(_ ctx: QuantContext, perBoard: Int = 45) -> [String] {
+        let fraction = Market.volumeFraction(ctx.now)
+        var byBoard: [String: [(Double, String)]] = [:]
+        for q in ctx.quotes {
+            guard !q.suspended, !q.upperLimit, !q.lowerLimit, q.price >= 2, tradeable(q) else { continue }
+            if let up = q.limitUpPrice, q.price >= up - 0.011 { continue }
+            guard let snap = overnightSnapshot(q, fraction: fraction), snap.fullAmount >= 5e7 else { continue }
+            byBoard[WatchData.pickBoard(code: q.code), default: []].append((snap.p5 + 0.1 * snap.gap, q.code))
+        }
+        return byBoard.values.flatMap { $0.sorted { $0.0 > $1.0 }.prefix(perBoard).map(\.1) }
+    }
+
     static func overnight(_ ctx: QuantContext, perBoard: Int = 15) -> [StockPick] {
         let minute = Market.minuteOfDay(ctx.now)
         let preview = Market.isSession(ctx.now) && minute < 890
@@ -781,7 +803,17 @@ enum QuantEngine {
         }
         var results: [StockPick] = []
         for (board, entries) in byBoard {
-            for (index, e) in entries.sorted(by: { $0.rank > $1.rank }).prefix(perBoard).enumerated() {
+            // Backtest 2026-11-13: candidates already up >=50% in 20 days or >=35% in 5 days gapped
+            // down >=5% about 10% of the time (vs ~2%) and lost ~1.4% per trade, so they are dropped.
+            var kept: [(entry: (rank: Double, p3: Double, p5: Double, gap: Double, raw: [Double], amp: Double, turnover: Double?, amount: Double, q: Quote), runup: (Double, Double)?)] = []
+            for e in entries.sorted(by: { $0.rank > $1.rank }).prefix(perBoard * 3) {
+                let runup = overnightRunup(ctx, e.q)
+                if let r = runup, r.0 >= 50 || r.1 >= 35 { continue }
+                kept.append((e, runup))
+                if kept.count >= perBoard { break }
+            }
+            for (index, k) in kept.enumerated() {
+                let e = k.entry
                 let q = e.q
                 let score = 100 * (0.5 * min(e.p3 / 0.6, 1) + 0.5 * min(e.p5 / 0.4, 1))
                 var signals = [String(format: "次日盘中冲高 ≥3%% 概率约 %.0f%%，≥5%% 约 %.0f%%（全市场平均约 25%% / 12%%）", e.p3 * 100, e.p5 * 100),
@@ -793,6 +825,11 @@ enum QuantEngine {
                 if e.raw[3] > 1.5 { risks.append(String(format: "高于分时均价 %.1f%%，尾盘追高，次日低开概率大", e.raw[3])) }
                 if e.raw[1] > 0.9 && q.changePercent > 3 { risks.append("收在日内最高附近，回测显示次日开盘更弱") }
                 if e.gap < -0.4 { risks.append("隔夜模型估计其低开幅度在候选中偏大") }
+                if let r = k.runup {
+                    if r.0 >= 30 { risks.append(String(format: "近 20 日已涨 %.0f%%，次日大幅低开的概率偏高", r.0)) }
+                } else {
+                    risks.append("近 20 日涨幅还未核验（日线加载中）：前期已大涨的股票次日跌停风险高，买前自己看一眼 K 线")
+                }
                 if ctx.weak { risks.append("今日市场弱势") }
                 let takeProfit = Market.roundPrice(q.price * 1.03)
                 var pick = item(q, "overnight", score, signals: signals, risks: risks, pivot: takeProfit, stop: Market.roundPrice(q.price * 0.97),

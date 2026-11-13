@@ -18,7 +18,7 @@ import Foundation
     /// never run two installs at once.
     private var pythonPreparation: Task<String?, Never>?
 
-    private static let apiVersion = 27
+    private static let apiVersion = 28
     /// Default bridge port; if another program holds it the bridge moves to the
     /// next free port in this range and the app follows it.
     nonisolated static let defaultPort = 8767

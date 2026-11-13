@@ -192,6 +192,7 @@ final class PadStore: ObservableObject {
         var codes: [String] = []
         for list in ["surge", "limit", "leader", "tail"] { codes += (lists[list] ?? []).prefix(20).map(\.code) }
         codes += trendCandidates.map(\.2.code) + pullbackCandidates.map(\.code)
+        codes += QuantEngine.overnightPool(ctx)
         var seen = Set<String>()
         codes = codes.filter { seen.insert($0).inserted }
         var missing: [String] = []
