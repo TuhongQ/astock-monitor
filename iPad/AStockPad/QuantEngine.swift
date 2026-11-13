@@ -250,6 +250,8 @@ enum QuantEngine {
                      description: "按中位涨幅、前五强均值和涨停家数给东财行业打热度，取最热的 6 个行业；在板块内按涨幅、成交额、是否涨停及封板早晚、盘中涨速挑出前两名。"),
         StrategyMeta(id: "tail", title: "尾盘潜伏", icon: "moon.stars.fill", summary: "14:30 后温和放量、收在高位",
                      description: "涨 2.5%–6%、量比 ≥ 1.2、换手 3%–12%、流通 30–300 亿、收在日内高位，午后 5 分钟线稳步走高、日线短均线多头、近 20 日涨幅不大。14:30 前为预览。"),
+        StrategyMeta(id: "steady", title: "保本冲高", icon: "shield.lefthalf.filled", summary: "弱势日买创业/科创板低位回调股，次日挂 +0.5% 卖；成交率约 85%，平均收益接近 0",
+                     description: "目标是「次日盘中大概率能小赚卖出」。条件：创业板 / 科创板；今日跌 3%–19% 未跌停、现价在日内区间下 20%；近 20 日平均振幅 4%–8%；成交额不超过前 5 日均值 1.5 倍；全市场上涨家数不足一半（强势日为空）。按成交额取前 5 只。14:50–14:57 买入，当天挂次日卖单 = 买入价 × 1.005，没成交就次日收盘前卖。全市场回测（5252 只，2025-12 至 2026-11，含 0.15% 成本）：成交率约 85%，平均每笔约 +0.14%，12 个月中 7 个月为正；没成交的约 15% 平均亏 4.8%。赢得多但赢得少，只适合小仓位。"),
         StrategyMeta(id: "overnight", title: "尾盘隔夜", icon: "sunrise.fill", summary: "高风险：14:50 买入、次日冲高卖出；回测平均每笔小亏",
                      description: "全市场（剔除 ST、北交所、停牌、涨停封死、跌停、成交额 < 5000 万）逐只估算「次日盘中最高价比现价高 3% / 5%」的概率。模型用 1490 只随机个股 2026 年以来约 16.5 万个交易日拟合并做样本外检验：入选前 10 只次日冲高 ≥5% 的实际比例约 33%（全市场约 12%），≥3% 约 49%（全市场约 25%）。换手、振幅、成交额、上影线加分，量比过大和尾盘追高（高于分时均价）减分。这类股票次日开盘平均低开约 1%，开盘直接卖期望为负：建议次日挂 +3% 止盈单，10:30 前未成交或跌破 −5% 就卖出。14:50 自动锁定，此前为预览。不并入「综合」。⚠️ 2026-11-13 全市场复盘（5252 只、14 个月）：这类高波动候选次日不论怎么设止盈止损，平均每笔约亏 0.4%–0.6%（含 0.15% 成本），14 个月几乎每月为负——它只提高「冲高」概率，不提高收益，只适合小仓位试错。已剔除回测更差的几类：20 日涨 ≥50% 或 5 日涨 ≥35%、盘中触及涨停后炸板、振幅 ≥10% 却收平、量比 ≥3。"),
     ]
@@ -766,6 +768,65 @@ enum QuantEngine {
                                  gap: dot(overnightWGap), raw: raw, amp: amp, turnover: turnover, fullAmount: fullAmount, vwap: vwap)
     }
 
+    // MARK: 保本冲高
+
+    private static func steadyCandidates(_ ctx: QuantContext) -> [Quote] {
+        let active = ctx.quotes.filter { !$0.suspended && $0.price > 0 }
+        let upRatio = Double(active.filter { $0.changePercent > 0 }.count) / Double(max(active.count, 1))
+        guard upRatio < 0.5 else { return [] }
+        let fraction = Market.volumeFraction(ctx.now)
+        return ctx.quotes.filter { q in
+            guard q.code.hasPrefix("300") || q.code.hasPrefix("301") || q.code.hasPrefix("688") || q.code.hasPrefix("689"),
+                  !q.suspended, !q.lowerLimit, tradeable(q), q.changePercent > -19, q.changePercent <= -3,
+                  let high = q.high, let low = q.low, high > low, (q.price - low) / (high - low) < 0.2 else { return false }
+            return (fraction > 0 ? q.amount / fraction : q.amount) >= 3e7
+        }
+    }
+
+    /// Codes the 保本冲高 list may draw from, so the daily-bar scan can prefetch them.
+    static func steadyPool(_ ctx: QuantContext) -> [String] { Array(steadyCandidates(ctx).prefix(120).map(\.code)) }
+
+    /// 保本冲高: full-market backtest 2026-11-13 — ~85% of picks touch +0.5% next day, mean ≈ +0.14% after cost.
+    static func steady(_ ctx: QuantContext, limit: Int = 5) -> [StockPick] {
+        let active = ctx.quotes.filter { !$0.suspended && $0.price > 0 }
+        let upRatio = Double(active.filter { $0.changePercent > 0 }.count) / Double(max(active.count, 1))
+        let fraction = Market.volumeFraction(ctx.now)
+        let today = Market.dayKey(ctx.now)
+        var picks: [(amount: Double, amp20: Double, ratio: Double, q: Quote)] = []
+        for q in steadyCandidates(ctx) {
+            guard let candles = ctx.daily[q.code], let high = q.high, let low = q.low else { continue }
+            let bars = candles.filter { $0.date != today }
+            guard bars.count >= 21 else { continue }
+            let prev = q.prevClose ?? bars[bars.count - 1].close
+            var amps: [Double] = []
+            for i in (bars.count - 19)..<bars.count { amps.append((bars[i].high - bars[i].low) / bars[i - 1].close * 100) }
+            amps.append((high - low) / prev * 100)
+            let amp20 = amps.reduce(0, +) / Double(amps.count)
+            guard amp20 >= 4, amp20 < 8 else { continue }
+            let avgAmount = bars.suffix(5).map(\.amount).reduce(0, +) / 5
+            let fullAmount = fraction > 0 ? q.amount / fraction : q.amount
+            guard avgAmount > 0, fullAmount / avgAmount < 1.5 else { continue }
+            picks.append((fullAmount, amp20, fullAmount / avgAmount, q))
+        }
+        let preview = Market.isSession(ctx.now) && Market.minuteOfDay(ctx.now) < 890
+        return picks.sorted { $0.amount > $1.amount }.prefix(limit).enumerated().map { index, e in
+            let sell = Market.roundPrice(e.q.price * 1.005)
+            var pick = item(e.q, "steady", Double(79 - index),
+                            signals: [String(format: "今日回调 %.1f%%、收在日内低位，近 20 日平均振幅 %.1f%%：次日盘中反抽到 +0.5%% 的历史比例约 85%%", e.q.changePercent, e.amp20),
+                                      String(format: "成交额是前 5 日均值的 %.1f 倍，没有放量出逃", e.ratio),
+                                      String(format: "弱势日（上涨家数 %.0f%%）尾盘承接，次日整体反抽概率更高", upRatio * 100)],
+                            risks: ["次日没碰到 +0.5% 的约 15%，平均亏 4.8%：没成交就收盘前卖，别拿着等回本",
+                                    "长期期望接近 0（回测每笔约 +0.14%），只适合小仓位",
+                                    "仅创业板 / 科创板，需要对应交易权限"],
+                            pivot: sell, stop: nil,
+                            highlights: [String(format: "卖单 %.2f", sell), String(format: "振幅20日 %.1f%%", e.amp20), String(format: "量 %.1fx", e.ratio)],
+                            tags: ["创业科创"] + (preview ? ["预览"] : []))
+            pick.takeProfit = sell
+            pick.board = "创业科创"
+            return pick
+        }
+    }
+
     /// (20-day %, 5-day %) up to the live price, nil until daily bars are cached.
     static func overnightRunup(_ ctx: QuantContext, _ q: Quote) -> (Double, Double)? {
         guard let candles = ctx.daily[q.code] else { return nil }
@@ -855,7 +916,7 @@ enum QuantEngine {
 
     static func combine(_ lists: [String: [StockPick]]) -> [StockPick] {
         var merged: [String: (pick: StockPick, base: Int)] = [:]
-        for id in strategies.map(\.id) where id != "all" && id != "overnight" {
+        for id in strategies.map(\.id) where id != "all" && id != "overnight" && id != "steady" {
             for pick in lists[id] ?? [] {
                 if var current = merged[pick.code] {
                     current.pick.strategies.append(id)

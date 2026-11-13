@@ -166,6 +166,7 @@ final class PadStore: ObservableObject {
         updated["leader"] = QuantEngine.leader(ctx)
         updated["tail"] = QuantEngine.tail(ctx)
         updated["overnight"] = QuantEngine.overnight(ctx)
+        updated["steady"] = QuantEngine.steady(ctx)
         updated["all"] = QuantEngine.combine(updated)
         lists = updated
         autoAddPicks()
@@ -193,6 +194,7 @@ final class PadStore: ObservableObject {
         for list in ["surge", "limit", "leader", "tail"] { codes += (lists[list] ?? []).prefix(20).map(\.code) }
         codes += trendCandidates.map(\.2.code) + pullbackCandidates.map(\.code)
         codes += QuantEngine.overnightPool(ctx)
+        codes += QuantEngine.steadyPool(ctx)
         var seen = Set<String>()
         codes = codes.filter { seen.insert($0).inserted }
         var missing: [String] = []
@@ -780,6 +782,8 @@ extension PadStore {
             if minutes >= 14 * 60 + 30 {
                 if h.style == "overnight", held >= 1 {
                     fire("expire", "隔夜单到期", String(format: "尾盘隔夜单的计划是次日卖出，今天还没触发止盈。收盘前处理，现盈亏 %+.2f%%。", pnl), critical: false)
+                } else if h.style == "steady", held >= 1 {
+                    fire("expire", "保本单到期", String(format: "保本冲高单今天没碰到 +0.5%% 卖单。回测里没成交的继续拿平均更亏，收盘前卖出，现盈亏 %+.2f%%。", pnl), critical: false)
                 } else if h.style == "short", held >= 3 {
                     fire("expire", "持有到期", String(format: "短线单已持有 %d 个交易日（回测最优持有期 3 天），现盈亏 %+.2f%%。继续拿的期望不再更高，考虑收盘前离场。", held, pnl), critical: false)
                 } else if h.style == "swing", held >= 10 {

@@ -461,6 +461,7 @@ struct PicksView: View {
         case "leader": .purple
         case "tail": .indigo
         case "overnight": .mint
+        case "steady": .green
         default: .pink
         }
     }
@@ -526,7 +527,7 @@ struct PicksView: View {
                 }
             }.frame(width: 140, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
-                Text(p.pivot.map { String(format: p.strategy == "overnight" ? "止盈 %.2f" : "观察 %.2f", $0) } ?? "—").foregroundStyle(.primary)
+                Text(p.pivot.map { String(format: p.strategy == "overnight" ? "止盈 %.2f" : p.strategy == "steady" ? "卖单 %.2f" : "观察 %.2f", $0) } ?? "—").foregroundStyle(.primary)
                 Text(p.stopLoss.map { String(format: "止损 %.2f", $0) + (p.riskPercent.map { String(format: "（-%.1f%%）", $0) } ?? "") } ?? "—")
                     .font(.caption2).foregroundStyle(.green)
             }.font(.caption).monospacedDigit().frame(width: 130, alignment: .leading)

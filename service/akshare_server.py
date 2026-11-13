@@ -28,7 +28,7 @@ socket.setdefaulttimeout(10)
 
 HOST, PORT, CACHE_SECONDS = "127.0.0.1", 8767, 1.5
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-API_VERSION = 28
+API_VERSION = 29
 INDEX_SYMBOLS = {
     "sh000001": "上证指数", "sz399001": "深证成指",
     "sz399006": "创业板指", "sh000680": "科创综指",
@@ -1074,6 +1074,9 @@ STRATEGY_META = [
     {"id": "tail", "title": "尾盘潜伏", "icon": "moon.stars.fill",
      "summary": "14:30 后温和放量、收在高位的稳健个股",
      "description": "经典尾盘选股：涨幅 2.5%–6%、量比 ≥ 1.2、换手 3%–12%、流通市值 30–300 亿、收在日内高位，且午后 5 分钟线稳步走高、日线 5 日线在 10 日线上方、近 20 日涨幅不大。14:30 前显示的是预览结果。"},
+    {"id": "steady", "title": "保本冲高", "icon": "shield.lefthalf.filled",
+     "summary": "弱势日尾盘买创业/科创板低位回调股，次日挂 +0.5% 卖单；成交率约 85%，平均收益接近 0",
+     "description": "目标不是大涨，而是「次日盘中大概率能小赚卖出」。条件（全部满足）：创业板 / 科创板；今日跌 3%–19% 且未跌停、现价在日内区间下 20%；近 20 日平均振幅 4%–8%（不选妖股）；今日成交额不超过前 5 日均值的 1.5 倍（没放量出逃）；全市场上涨家数不足一半（弱势日才出信号，强势日为空）。按成交额取前 5 只。用法：14:50–14:57 买入，当天就挂次日卖单 = 买入价 × 1.005；次日没成交就在收盘前卖出，不要拿着等回本。全市场回测（5252 只，2025-12 至 2026-11，含 0.15% 成本）：次日能以 +0.5% 卖出的比例约 85%，平均每笔约 +0.14%，三个时间段都为正，但 12 个月里只有 7 个月为正；没成交的约 15% 平均亏 4.8%，单日最差平均 −5.8%。也就是说它赢得多、赢得少，输得少、输得多，长期大致打平略正，只适合小仓位。"},
     {"id": "overnight", "title": "尾盘隔夜", "icon": "sunrise.fill",
      "summary": "高风险：14:50 买入、次日冲高卖出；回测平均每笔小亏，只适合小仓位",
      "description": "全市场（剔除 ST、北交所、停牌、涨停封死、跌停、成交额 < 5000 万）逐只估算「次日盘中最高价比现价高 3% / 5%」的概率。模型用 1490 只随机个股 2026 年以来约 16.5 万个交易日拟合，并做了样本外检验：入选前 10 只次日冲高 ≥5% 的实际比例约 33%（全市场约 12%），≥3% 约 49%（全市场约 25%）。最有效的因子是换手、振幅、成交额和上影线（盘中资金活跃），量比过大、尾盘追高（高于分时均价）反而减分。注意：这类股票次日开盘平均低开约 1%，开盘直接卖出期望为负；建议次日挂 +3% 止盈单，10:30 前未成交或跌破 −5% 止损就卖出。14:50 自动锁定当日推荐，此前为预览；排序每 12 秒随行情刷新。⚠️ 2026-11-13 全市场复盘（5252 只、14 个月）：这类高波动候选次日不论怎么设止盈止损，平均每笔约亏 0.4%–0.6%（含 0.15% 成本），14 个月几乎每月为负——它只提高「冲高」概率，不提高收益，只适合小仓位试错。已剔除回测更差的几类：20 日涨 ≥50% 或 5 日涨 ≥35%、盘中触及涨停后炸板、振幅 ≥10% 却收平、量比 ≥3。"},
@@ -2647,6 +2650,95 @@ def strategy_overnight(ctx):
     results.sort(key=lambda item: (item.get("pHi5") or 0), reverse=True)
     return results
 
+STEADY_TARGET = 0.5
+STEADY_LIMIT = 5
+
+def strategy_steady(ctx):
+    """保本冲高: GEM/STAR names that sold off into the day's low on a weak day,
+    sold next day at +0.5%. Full-market backtest 2026-11-13: ~85% fill, mean
+    about +0.14% per trade after cost, misses lose ~4.8%."""
+    now = ctx["now"]
+    rows = ctx["rows"]
+    active = [r for r in rows if not r.get("suspended") and (r.get("price") or 0) > 0]
+    up_ratio = sum((r.get("changePercent") or 0) > 0 for r in active) / max(len(active), 1)
+    if up_ratio >= 0.5:
+        return []
+    fraction = _volume_fraction(now)
+    today = now.strftime("%Y-%m-%d")
+    try:
+        ohlc = eastmoney_ohlc_snapshot()
+    except Exception as exc:
+        print(f"Eastmoney OHLC snapshot failed: {exc}", flush=True)
+        ohlc = {}
+    picks, missing = [], []
+    for base in rows:
+        extra = ohlc.get(base["code"])
+        q = dict(base, **{k: v for k, v in extra.items() if v is not None and k != "price"}) if extra else base
+        code, price = q["code"], q.get("price") or 0
+        change = q.get("changePercent") or 0
+        if not code.startswith(("300", "301", "688", "689")) or price <= 0:
+            continue
+        if q.get("suspended") or q.get("lowerLimit") or not _is_tradeable_board(code, q.get("name", "")):
+            continue
+        if not (-19 < change <= -3):
+            continue
+        high, low = q.get("high"), q.get("low")
+        if not high or not low or high <= low or (price - low) / (high - low) >= 0.2:
+            continue
+        amount = q.get("amount") or 0
+        full_amount = amount / fraction if fraction > 0 else amount
+        if full_amount < 3e7:
+            continue
+        history = cached_daily(code)
+        if not history:
+            missing.append(code)
+            continue
+        bars = [b for b in history if b.get("date") != today]
+        if len(bars) < 21:
+            continue
+        prev_close = q.get("prevClose") or bars[-1]["close"]
+        amps = [(b["high"] - b["low"]) / a["close"] * 100 for a, b in zip(bars[-20:-1], bars[-19:])]
+        amps.append((high - low) / prev_close * 100)
+        amp20 = sum(amps) / len(amps)
+        if not 4 <= amp20 < 8:
+            continue
+        past_amount = [b.get("amount") or 0 for b in bars[-5:]]
+        avg_amount = sum(past_amount) / 5
+        if avg_amount <= 0 or full_amount / avg_amount >= 1.5:
+            continue
+        picks.append((full_amount, amp20, full_amount / avg_amount, q))
+    if missing:
+        _overnight_prefetch(missing[:120])
+    picks.sort(key=lambda entry: entry[0], reverse=True)
+    minute = now.hour * 60 + now.minute
+    preview = 570 <= minute < 890 and now.weekday() < 5
+    results = []
+    for rank, (full_amount, amp20, amount_ratio, q) in enumerate(picks[:STEADY_LIMIT], start=1):
+        price, change = q["price"], q.get("changePercent", 0)
+        sell = _round_price(price * (1 + STEADY_TARGET / 100))
+        signals = [f"今日回调 {change:.1f}%、收在日内低位，近 20 日平均振幅 {amp20:.1f}%：次日盘中反抽到 +0.5% 的历史比例约 85%",
+                   f"成交额是前 5 日均值的 {amount_ratio:.1f} 倍，没有放量出逃",
+                   f"弱势日（上涨家数 {up_ratio * 100:.0f}%）尾盘承接，次日整体反抽概率更高"]
+        risks = ["次日没碰到 +0.5% 的约 15%，平均亏 4.8%：没成交就收盘前卖，别拿着等回本",
+                 "长期期望接近 0（回测每笔约 +0.14%），只适合小仓位",
+                 "仅创业板 / 科创板，需要对应交易权限"]
+        results.append(_base_item(q, "steady", 80 - rank, signals, risks, pivot=sell, stop=None,
+                                  highlights=[f"卖单 {sell:.2f}", f"振幅20日 {amp20:.1f}%", f"量 {amount_ratio:.1f}x"],
+                                  tags=["创业科创"] + (["预览"] if preview else []),
+                                  extra={"takeProfit": sell, "board": "创业科创"}))
+    return results
+
+def _steady_note(ctx_breadth=None):
+    now = datetime.now(SHANGHAI_TZ)
+    minute = now.hour * 60 + now.minute
+    if now.weekday() >= 5:
+        return "休市：显示最近收盘时的结果，仅供参考"
+    if 570 <= minute < 890:
+        return "14:50 前为预览；只在上涨家数不足一半的弱势日出信号"
+    if 890 <= minute < 900:
+        return "14:50–14:57 买入，当天挂次日卖单 = 买入价 × 1.005，未成交就次日收盘前卖"
+    return "只在弱势日出信号；次日挂 +0.5% 卖单，未成交收盘前卖出"
+
 def _finalize(results, min_score):
     results = [item for item in results if item["score"] >= min_score]
     results.sort(key=lambda item: (item["score"], item["changePercent"]), reverse=True)
@@ -2838,7 +2930,7 @@ def potential_payload(provider="auto"):
             "market": ctx["breadth"], "emotion": ctx["emotion"] or None,
             "lists": {"surge": strategy_surge(ctx), "limit": strategy_limit(ctx),
                       "leader": strategy_leader(ctx), "tail": strategy_tail(ctx),
-                      "overnight": strategy_overnight(ctx)},
+                      "overnight": strategy_overnight(ctx), "steady": strategy_steady(ctx)},
             "live": ctx["live"],
         }
         with live_cache_lock:
@@ -2848,7 +2940,7 @@ def potential_payload(provider="auto"):
     lists = dict(live["lists"])
     lists.update(state["lists"])
     # 尾盘隔夜 has a different holding horizon (one night), so it is not merged into 综合.
-    lists["all"] = combine_lists({key: value for key, value in lists.items() if key not in ("all", "overnight")})
+    lists["all"] = combine_lists({key: value for key, value in lists.items() if key not in ("all", "overnight", "steady")})
     notes = {
         "surge": None if live["live"] else "非交易时段：显示今日已记录的速拉事件（以收盘价计算承接）",
         "limit": None if live["emotion"] else "涨停池加载中…",
@@ -2856,6 +2948,7 @@ def potential_payload(provider="auto"):
         "trend": None if state["updatedAt"] else "日线复核中，首次需要 1–3 分钟",
         "tail": "14:30 前为预览，尾盘结果更有效" if live["live"] and datetime.now(SHANGHAI_TZ).hour * 60 + datetime.now(SHANGHAI_TZ).minute < 870 else None,
         "overnight": _overnight_note(),
+        "steady": _steady_note(),
     }
     strategies = [dict(meta, count=len(lists.get(meta["id"], [])), note=notes.get(meta["id"])) for meta in STRATEGY_META]
     updated = state["updatedAt"]

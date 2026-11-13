@@ -1355,6 +1355,7 @@ struct DashboardView: View {
         case "leader": .purple
         case "tail": .indigo
         case "overnight": .mint
+        case "steady": .green
         default: .pink
         }
     }
@@ -1504,7 +1505,7 @@ struct DashboardView: View {
                 }
             }.frame(width: 128, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
-                Text(stock.pivot.map { String(format: stock.strategy == "overnight" ? "止盈 %.2f" : "观察 %.2f", $0) } ?? "—")
+                Text(stock.pivot.map { String(format: stock.strategy == "overnight" ? "止盈 %.2f" : stock.strategy == "steady" ? "卖单 %.2f" : "观察 %.2f", $0) } ?? "—")
                 Text(stopText).font(.caption2).foregroundStyle(.green)
             }.monospacedDigit().frame(width: 112, alignment: .leading)
             VStack(alignment: .leading, spacing: 3) {
@@ -2779,7 +2780,7 @@ private struct StockInsightPanel: View {
                 Text(match.title).font(.system(size: 12, weight: .semibold))
                 Text("\(match.score) 分").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                if let pivot = match.pivot { Text(String(format: match.strategy == "overnight" ? "止盈 %.2f" : "观察 %.2f", pivot)).font(.caption2).monospacedDigit() }
+                if let pivot = match.pivot { Text(String(format: match.strategy == "overnight" ? "止盈 %.2f" : match.strategy == "steady" ? "卖单 %.2f" : "观察 %.2f", pivot)).font(.caption2).monospacedDigit() }
                 if let stop = match.stopLoss { Text(String(format: "止损 %.2f", stop)).font(.caption2).foregroundStyle(.green).monospacedDigit() }
             }
             if !match.highlights.isEmpty {

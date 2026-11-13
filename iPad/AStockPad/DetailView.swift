@@ -284,7 +284,7 @@ struct StockDetailView: View {
                 Text(QuantEngine.titles[p.strategy] ?? p.strategy).font(.subheadline.bold())
                 Text("\(p.score) 分").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                if let pivot = p.pivot { Text((p.strategy == "overnight" ? "止盈 " : "观察 ") + Fmt.price(pivot)).font(.caption2) }
+                if let pivot = p.pivot { Text((p.strategy == "overnight" ? "止盈 " : p.strategy == "steady" ? "卖单 " : "观察 ") + Fmt.price(pivot)).font(.caption2) }
                 if let stop = p.stopLoss { Text("止损 \(Fmt.price(stop))").font(.caption2).foregroundStyle(.green) }
             }
             if !p.highlights.isEmpty { Text(p.highlights.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary) }

@@ -589,6 +589,7 @@ struct Holding: Codable, Identifiable, Hashable {
     /// 主要作用是把最差 5% 的亏损从 −7%~−14% 压到 −4%~−8%；参数取「平均收益不变差、尾部亏损最小」的一组。
     static let styles: [(id: String, title: String, hint: String)] = [
         ("overnight", "尾盘隔夜", "次日冲高卖：止盈 +3%，止损 −5%（−3% 会被次日低开先打掉，回测更差），次日 14:30 未走提醒清仓"),
+        ("steady", "保本冲高", "次日卖：挂 +0.5% 卖单，碰到就提醒；没碰到 14:30 提醒收盘前卖（回测：拿着等回本更亏），−8% 兜底止损"),
         ("short", "短线 1–3 天", "止损 −4%、止盈 +10%，盈利 5% 后从高点回落 3% 提醒，持满 3 个交易日提醒离场"),
         ("swing", "波段", "止损 −8% 或跌破 20 日线、止盈 +10%，盈利 6% 后从高点回落 5% 提醒，持满 10 个交易日提醒复核"),
     ]
@@ -599,6 +600,7 @@ struct Holding: Codable, Identifiable, Hashable {
         let (stop, target, activate, drawdown): (Double, Double, Double, Double)
         switch style {
         case "overnight": (stop, target, activate, drawdown) = (5, 3, 3, 1.5)
+        case "steady": (stop, target, activate, drawdown) = (8, 0.5, 99, 1)
         case "swing": (stop, target, activate, drawdown) = (8, 10, 6, 5)
         default: (stop, target, activate, drawdown) = (4, 10, 5, 3)
         }
